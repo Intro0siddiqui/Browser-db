@@ -1,0 +1,59 @@
+[package]
+name = "browserdb"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance browser database with FFI bindings to Zig core"
+authors = ["BrowserDB Team"]
+license = "BSD-3-Clause"
+
+[lib]
+name = "browserdb"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+# 异步运行时
+tokio = { version = "1.0", features = ["full"] }
+
+# 序列化/反序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 并发支持
+parking_lot = "0.12"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+# FFI支持
+libc = "0.2"
+
+# 构建时依赖
+[build-dependencies]
+cc = "1.0"
+
+[dev-dependencies]
+# 测试支持
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.0"
+
+# 基准测试
+[dev-dependencies.bench]
+path = "tests/bench"
+
+[features]
+# 启用性能测试
+performance = []
+
+# 启用详细日志
+verbose-logging = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# 测试配置
+[[bench]]
+name = "benchmark"
+harness = false

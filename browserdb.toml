@@ -1,0 +1,71 @@
+# BrowserDB 项目配置
+
+[project]
+name = "BrowserDB"
+version = "0.1.0"
+description = "High-performance browser database with LSM-tree hybrid architecture"
+authors = ["BrowserDB Team"]
+license = "BSD-3-Clause"
+repository = "https://github.com/browserdb/browserdb"
+homepage = "https://browserdb.dev"
+
+[build]
+# Zig 配置
+zig_version = "0.13.0"
+zig_optimize = "ReleaseSafe"
+
+# Rust 配置  
+rust_version = "1.75"
+rust_features = ["performance", "verbose_logging"]
+
+[performance]
+# 性能目标
+write_ops_per_sec = 10000
+read_ops_per_sec = 100000
+memory_limit_mb = 50
+disk_footprint_mb = 500
+query_latency_ms = 1.0
+cache_hit_rate = 0.95
+
+[features]
+# 核心功能
+core_engine = true
+ffi_bindings = true
+heatmap_indexing = true
+lsm_tree = true
+
+# 可选功能
+performance_testing = true
+verbose_logging = false
+encryption = false
+compression = true
+
+[paths]
+# 路径配置
+default_db_path = "~/.browserdb"
+temp_db_path = "/tmp/browserdb"
+test_db_path = "/tmp/browserdb-test"
+
+# 文件扩展名
+history_file = "history.bdb"
+cookies_file = "cookies.bdb"
+cache_file = "cache.bdb"
+localstore_file = "localstore.bdb"
+settings_file = "settings.bdb"
+
+[limits]
+# 各种限制
+max_memtable_size_mb = 4
+max_sstable_size_mb = 64
+max_cache_size_mb = 500
+max_history_entries = 100000
+max_cookie_entries = 10000
+bloom_filter_fpr = 0.01
+
+[optimization]
+# 优化参数
+compaction_cpu_limit = 0.05
+heat_decay_rate = 0.1
+hot_threshold = 0.7
+warm_threshold = 0.3
+cold_threshold = 0.1

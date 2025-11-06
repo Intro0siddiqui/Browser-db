@@ -1,0 +1,60 @@
+# BrowserDB 项目文件
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+
+# Zig 编译输出
+zig-out/
+zig-cache/
+.zig/
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# Rust 编译输出
+target/
+Cargo.lock
+
+# 临时测试数据
+*.bdb
+test-*
+bench-*
+/tmp/browserdb*
+
+# 编辑器和IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.orig
+
+# 环境变量
+.env
+.env.local
+
+# 依赖管理
+node_modules/
+vendor/
+
+# 性能分析数据
+perf.data*
+profile.data*
+
+# 代码覆盖率
+*.lcov
+*.gcov
+coverage/
+
+# 备份文件
+*.bak
+*.backup
+*.old
