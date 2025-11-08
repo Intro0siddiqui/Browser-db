@@ -210,8 +210,8 @@ See [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for detailed development guidelines
 
 ## 🤝 Community
 
-- **Issues**: [GitHub Issues](https://github.com/browserdb/browserdb/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/browserdb/browserdb/discussions)
+- **Issues**: [GitHub Issues](https://github.com/Intro0siddiqui/browserdb/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/Intro0siddiqui/browserdb/discussions)
 - **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ---
