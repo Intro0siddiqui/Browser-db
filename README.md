@@ -212,7 +212,7 @@ See [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for detailed development guidelines
 
 - **Issues**: [GitHub Issues](https://github.com/Intro0siddiqui/Browser-db/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/Intro0siddiqui/Browser-db/discussions)
-- **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md)
+- **Contributing**: See [Contribution.md](https://github.com/Intro0siddiqui/Browser-db/blob/main/Contribution.md)
 
 ---
 
