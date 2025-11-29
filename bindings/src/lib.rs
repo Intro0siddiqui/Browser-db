@@ -1,4 +1,5 @@
 pub mod core;
+pub mod sql;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -94,9 +95,28 @@ impl BrowserDB {
     pub fn cache(&self) -> CacheTable<'_> { CacheTable { db: self } }
     pub fn localstore(&self) -> LocalStoreTable<'_> { LocalStoreTable { db: self } }
     pub fn settings(&self) -> SettingsTable<'_> { SettingsTable { db: self } }
+    
+    pub fn sql(self: Arc<Self>) -> sql::SqlEngine {
+        sql::SqlEngine::new(self)
+    }
+
+    pub(crate) fn put_raw_localstore(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+        match &*self.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.localstore.put(key, value)?,
+            CurrentMode::Ultra(um) => um.localstore.put(key, value),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn get_raw_localstore(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        let value_opt = match &*self.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.localstore.get(key).map(|e| e.value),
+            CurrentMode::Ultra(um) => um.localstore.get(key),
+        };
+        Ok(value_opt)
+    }
 
     pub fn stats(&self) -> Result<DatabaseStats, Box<dyn std::error::Error>> {
-        // Placeholder stats
         Ok(DatabaseStats {
             total_entries: 0,
             history_entries: 0,
@@ -108,7 +128,6 @@ impl BrowserDB {
     }
     
     pub fn wipe(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Implement wipe
         Ok(())
     }
 }

@@ -104,6 +104,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Multi-mode support** - Persistent and Ultra (RAM) modes
 - **Zero Dependencies** - Pure Rust implementation
 
+## 🧩 Modular SQL Subsystem
+
+BrowserDB now features a **Modular SQL Engine**. Adhering to the Unix Philosophy ("Do one thing and do it well"), the core remains a lightning-fast KV store, while SQL is an optional layer on top.
+
+```rust
+use browserdb::BrowserDB;
+
+// 1. Open the raw, fast core
+let db = BrowserDB::open("my.db")?;
+
+// 2. Enable SQL Layer
+let sql = std::sync::Arc::new(db).sql();
+
+// 3. Execute SQL
+sql.execute("CREATE TABLE users (id INT PRIMARY_KEY, name TEXT)")?;
+sql.execute("INSERT INTO users VALUES (1, 'Alice')")?;
+let result = sql.execute("SELECT * FROM users WHERE id = 1")?;
+```
+
+This architecture allows you to mix **Raw Performance (700k+ ops/sec)** with **Structured Queries** in the same application.
+
 ## 🏃‍♂️ Performance Benchmarks
 
 ```bash
