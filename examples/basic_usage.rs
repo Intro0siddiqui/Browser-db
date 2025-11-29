@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache_entry = CacheEntry {
         url_hash: 0x1111222233334444,
         headers: "Content-Type: text/html; charset=utf-8".to_string(),
-        body: b"<!DOCTYPE html><html><head><title>示例页面</title></head><body><h1>BrowserDB 缓存示例</h1></body></html>".to_vec(),
+        body: "<!DOCTYPE html><html><head><title>示例页面</title></head><body><h1>BrowserDB 缓存示例</h1></body></html>".as_bytes().to_vec(),
         etag: "W/\"abc123\"".to_string(),
         last_modified: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
