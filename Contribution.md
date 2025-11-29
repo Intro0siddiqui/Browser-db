@@ -39,8 +39,8 @@ Please follow common open-source community standards. Be respectful, inclusive, 
    git fetch upstream
 
 Prerequisites (for development)
-- Zig 0.13.0+ (core engine)
-- Rust 1.75+ (FFI bindings)
+- Zig 0.14+
+- Rust 1.75+ 
 - CMake 3.16+
 - Cargo (for Rust examples/tests)
 - Node.js / npm (only if JS bindings or web tooling are added)
