@@ -50,8 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Feature | BrowserDB (Rust) | IndexedDB | SQLite |
 |---------|-----------|-----------|---------|
-| **Read Performance** | **890K+ ops/sec** | 10K ops/sec | 50K ops/sec |
-| **Write Performance** | **700K+ ops/sec** | 1K ops/sec | 10K ops/sec |
+| **Read Performance** | **120K+ ops/sec** | 10K ops/sec | 50K ops/sec |
+| **Write Performance** | **100K+ ops/sec** | 1K ops/sec | 10K ops/sec |
 | **Memory Efficiency** | <50MB | 100MB+ | 80MB+ |
 | **Cache Hit Rate** | 95% | 70% | 85% |
 | **Query Latency** | <0.1ms | 10ms | 2ms |
