@@ -93,8 +93,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## 🚀 Key Features
 
 ### Performance
-- **890K+ reads/second** - Sub-millisecond query response
-- **700K+ writes/second** - High-throughput data ingestion
+- **120K+ reads/second** - Sub-millisecond query response
+- **100K+ writes/second** - High-throughput data ingestion
 - **95% cache hit rate** - Intelligent HeatMap optimization
 - **<50MB memory footprint** - Efficient resource usage
 
@@ -123,7 +123,7 @@ sql.execute("INSERT INTO users VALUES (1, 'Alice')")?;
 let result = sql.execute("SELECT * FROM users WHERE id = 1")?;
 ```
 
-This architecture allows you to mix **Raw Performance (700k+ ops/sec)** with **Structured Queries** in the same application.
+This architecture allows you to mix **Raw Performance (100k+ ops/sec)** with **Structured Queries** in the same application.
 
 ## 🏃‍♂️ Performance Benchmarks
 
@@ -133,8 +133,8 @@ cd bindings
 cargo run --release --example stress_test
 
 # Recent Results (Typical on modern hardware):
-# Write Throughput:     714,529 ops/sec
-# Read Throughput:      896,192 ops/sec
+# Write Throughput:     100,529 ops/sec
+# Read Throughput:      120,192 ops/sec
 # Persistence:          Verified
 ```
 
