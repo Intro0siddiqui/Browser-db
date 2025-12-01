@@ -1,5 +1,5 @@
 # BrowserDB 🚀
-
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Intro0siddiqui/Browser-db)
 > Lightning-fast, privacy-first database for modern browsers, now in **Pure Rust**!
 
 BrowserDB is a high-performance, browser-native database designed as a modern alternative to IndexedDB. Built with a LSM-tree hybrid architecture and intelligent HeatMap indexing, it delivers sub-millisecond queries with 95% cache hit rates.
