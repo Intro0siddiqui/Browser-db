@@ -25,6 +25,7 @@ async fn test_database_creation_and_basic_operations() {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis(),
+        url: "https://example.com/test".to_string(),
         url_hash: 0x123456789abcdef0,
         title: "Test Page".to_string(),
         visit_count: 1,
@@ -157,6 +158,7 @@ async fn test_privacy_wipe_operations() {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis(),
+        url: "https://evil.com/track".to_string(),
         url_hash: 0x9999aaaabbbbcccc,
         title: "evil.com tracking page".to_string(),
         visit_count: 5,
@@ -189,6 +191,7 @@ async fn test_performance_operations() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis(),
+            url: format!("https://example.com/{}", i),
             url_hash: u128::from_le_bytes([i as u8; 16]),
             title: format!("Performance Test Entry {}", i),
             visit_count: 1,
@@ -222,6 +225,7 @@ async fn test_database_wipe() {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis(),
+        url: "https://test.com/wipe".to_string(),
         url_hash: 0xdeadbeefcafebabe,
         title: "Test Entry".to_string(),
         visit_count: 1,
