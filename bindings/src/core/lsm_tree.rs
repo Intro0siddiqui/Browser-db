@@ -29,6 +29,7 @@ pub struct MemTable {
     pub entries: BTreeMap<Vec<u8>, KVEntry>,
     pub max_size: usize,
     pub current_size: usize,
+    pub entry_count: usize,
     pub table_type: TableType,
 }
 
@@ -38,6 +39,7 @@ impl MemTable {
             entries: BTreeMap::new(),
             max_size,
             current_size: 0,
+            entry_count: 0,
             table_type,
         }
     }
@@ -56,6 +58,8 @@ impl MemTable {
         // Update size: subtract old entry size if exists, add new entry size
         if let Some(old_entry) = self.entries.insert(key, entry) {
             self.current_size -= old_entry.size();
+        } else {
+            self.entry_count += 1;
         }
         self.current_size += new_size;
     }
@@ -71,6 +75,7 @@ impl MemTable {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.current_size = 0;
+        self.entry_count = 0;
     }
 }
 
@@ -115,8 +120,6 @@ impl SSTable {
         let mut offset = 0u64;
         
         for entry in entries.values() {
-            if entry.deleted { continue; }
-            
             let mut bdb_entry = BDBLogEntry {
                 entry_type: entry.entry_type,
                 key: entry.key.clone(),
@@ -176,13 +179,13 @@ impl SSTable {
             let mut cursor = io::Cursor::new(data);
             
             if let Ok(log_entry) = BDBLogEntry::read(&mut cursor) {
-                 return Some(KVEntry {
-                     key: log_entry.key,
-                     value: log_entry.value,
-                     timestamp: log_entry.timestamp,
-                     entry_type: log_entry.entry_type,
-                     deleted: log_entry.entry_type == EntryType::Delete,
-                 });
+                return Some(KVEntry {
+                    key: log_entry.key,
+                    value: log_entry.value,
+                    timestamp: log_entry.timestamp,
+                    entry_type: log_entry.entry_type,
+                    deleted: log_entry.entry_type == EntryType::Delete,
+                });
             }
         }
         
@@ -307,10 +310,32 @@ impl LSMTree {
         }
         Ok(())
     }
+
+    pub fn clear(&self) -> io::Result<()> {
+        let mut mem = self.memtable.write();
+        mem.clear();
+        drop(mem);
+
+        let mut levels = Vec::new();
+        for l in &self.levels {
+            levels.push(l.write());
+        }
+
+        for mut level in levels {
+            for sstable in level.drain(..) {
+                let _ = fs::remove_file(&sstable.file_path);
+            }
+        }
+
+        Ok(())
+    }
     
     pub fn get(&self, key: &[u8]) -> Option<KVEntry> {
         // 1. MemTable
         if let Some(entry) = self.memtable.read().get(key) {
+            if entry.deleted {
+                return None;
+            }
             return Some(entry);
         }
         
@@ -320,12 +345,86 @@ impl LSMTree {
             // Search newest SSTables first (usually end of list)
             for sstable in sstables.iter().rev() {
                 if let Some(entry) = sstable.get(key) {
+                    if entry.deleted {
+                        return None;
+                    }
                     return Some(entry);
                 }
             }
         }
         
         None
+    }
+
+    pub fn delete(&self, key: Vec<u8>) -> io::Result<()> {
+        let mut mem = self.memtable.write();
+        mem.put(key, Vec::new(), EntryType::Delete);
+
+        if mem.should_flush() {
+            drop(mem);
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn all_entries(&self) -> Vec<KVEntry> {
+        self.scan_prefix(&[])
+    }
+
+    pub fn scan_prefix(&self, prefix: &[u8]) -> Vec<KVEntry> {
+        let mut results: BTreeMap<Vec<u8>, KVEntry> = BTreeMap::new();
+
+        // 1. MemTable
+        let mem = self.memtable.read();
+        let range = if prefix.is_empty() {
+            mem.entries.range::<Vec<u8>, _>(..)
+        } else {
+            mem.entries.range(prefix.to_vec()..)
+        };
+
+        for (key, entry) in range {
+            if !prefix.is_empty() && !key.starts_with(prefix) { break; }
+            results.insert(key.clone(), entry.clone());
+        }
+
+        // 2. Levels (newest SSTables first)
+        for level in &self.levels {
+            let sstables = level.read();
+            for sstable in sstables.iter().rev() {
+                let start_idx = if prefix.is_empty() {
+                    0
+                } else {
+                    match sstable.index.binary_search_by(|idx| idx.key.as_slice().cmp(prefix)) {
+                        Ok(i) => i,
+                        Err(i) => i,
+                    }
+                };
+
+                for idx in &sstable.index[start_idx..] {
+                    if !prefix.is_empty() && !idx.key.starts_with(prefix) { break; }
+                    if !results.contains_key(&idx.key) {
+                        // Directly read from mmap
+                        let start = idx.position as usize;
+                        let end = start + idx.size;
+                        if end <= sstable.mmap.len() {
+                            let data = &sstable.mmap[start..end];
+                            let mut cursor = io::Cursor::new(data);
+                            if let Ok(log_entry) = BDBLogEntry::read(&mut cursor) {
+                                results.insert(idx.key.clone(), KVEntry {
+                                    key: log_entry.key,
+                                    value: log_entry.value,
+                                    timestamp: log_entry.timestamp,
+                                    entry_type: log_entry.entry_type,
+                                    deleted: log_entry.entry_type == EntryType::Delete,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        results.into_values().filter(|e| !e.deleted).collect()
     }
     
     pub fn flush(&self) -> io::Result<()> {
@@ -358,4 +457,3 @@ impl Drop for LSMTree {
         }
     }
 }
-

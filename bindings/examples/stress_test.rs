@@ -34,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis(),
+            url: format!("https://example.com/page/{}", i),
             url_hash: i as u128, // Sequential for verification, could be random
             title: format!("Page Title for Record ID {}", i),
             visit_count: rng.gen_range(1..100),
