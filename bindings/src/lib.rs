@@ -161,50 +161,12 @@ impl BrowserDB {
     pub fn wipe(&self) -> Result<(), Box<dyn std::error::Error>> {
         let current_mode = self.switcher.current_mode.read();
         match &*current_mode {
-            CurrentMode::Persistent(_) => {
-                // Collect keys while holding the lock
-                let (history_keys, cookies_keys, cache_keys, localstore_keys, settings_keys) = {
-                    if let CurrentMode::Persistent(pm) = &*current_mode {
-                        (
-                            pm.history.all_entries().into_iter().map(|e| e.key).collect::<Vec<_>>(),
-                            pm.cookies.all_entries().into_iter().map(|e| e.key).collect::<Vec<_>>(),
-                            pm.cache.all_entries().into_iter().map(|e| e.key).collect::<Vec<_>>(),
-                            pm.localstore.all_entries().into_iter().map(|e| e.key).collect::<Vec<_>>(),
-                            pm.settings.all_entries().into_iter().map(|e| e.key).collect::<Vec<_>>(),
-                        )
-                    } else {
-                        unreachable!()
-                    }
-                };
-
-                // Release lock
-                drop(current_mode);
-
-                for k in history_keys {
-                    if let CurrentMode::Persistent(pm) = &*self.switcher.current_mode.read() {
-                        pm.history.delete(k)?;
-                    }
-                }
-                for k in cookies_keys {
-                    if let CurrentMode::Persistent(pm) = &*self.switcher.current_mode.read() {
-                        pm.cookies.delete(k)?;
-                    }
-                }
-                for k in cache_keys {
-                    if let CurrentMode::Persistent(pm) = &*self.switcher.current_mode.read() {
-                        pm.cache.delete(k)?;
-                    }
-                }
-                for k in localstore_keys {
-                    if let CurrentMode::Persistent(pm) = &*self.switcher.current_mode.read() {
-                        pm.localstore.delete(k)?;
-                    }
-                }
-                for k in settings_keys {
-                    if let CurrentMode::Persistent(pm) = &*self.switcher.current_mode.read() {
-                        pm.settings.delete(k)?;
-                    }
-                }
+            CurrentMode::Persistent(pm) => {
+                pm.history.clear()?;
+                pm.cookies.clear()?;
+                pm.cache.clear()?;
+                pm.localstore.clear()?;
+                pm.settings.clear()?;
             },
             CurrentMode::Ultra(um) => {
                 um.history.data.write().clear();
@@ -373,21 +335,25 @@ impl<'a> LocalStoreTable<'a> {
     }
 
     pub fn get_by_origin(&self, origin_hash: u128) -> Result<Vec<LocalStoreEntry>, Box<dyn std::error::Error>> {
-        let all_entries: Vec<Vec<u8>> = match &*self.db.switcher.current_mode.read() {
+        let prefix = bincode::serialize(&origin_hash)?;
+
+        let values: Vec<Vec<u8>> = match &*self.db.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => {
-                pm.localstore.all_entries().into_iter().map(|e| e.value).collect()
+                pm.localstore.scan_prefix(&prefix).into_iter().map(|e| e.value).collect()
             },
             CurrentMode::Ultra(um) => {
-                um.localstore.all_entries().into_iter().map(|(_, v)| v).collect()
+                // For Ultra mode (HashMap), we still need to filter all entries unless we change the storage
+                um.localstore.all_entries().into_iter()
+                    .filter(|(k, _)| k.starts_with(&prefix))
+                    .map(|(_, v)| v)
+                    .collect()
             }
         };
 
         let mut results = Vec::new();
-        for value in all_entries {
+        for value in values {
             let entry: LocalStoreEntry = bincode::deserialize(&value)?;
-            if entry.origin_hash == origin_hash {
-                results.push(entry);
-            }
+            results.push(entry);
         }
         Ok(results)
     }

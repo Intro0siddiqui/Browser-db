@@ -151,31 +151,31 @@ impl ModeSwitcher {
     pub fn switch_mode(&self, new_mode: DatabaseMode, path: &Path) -> Result<(), ModeSwitchError> {
         let mut current = self.current_mode.write();
         
-        // Check for unsynced data to prevent data loss as per nitpick
-        match &*current {
-            CurrentMode::Persistent(pm) => {
-                if new_mode == DatabaseMode::Ultra && pm.has_unsynced_data() {
-                    return Err(ModeSwitchError::DataLoss);
-                }
-            },
-            CurrentMode::Ultra(um) => {
-                if new_mode == DatabaseMode::Persistent {
-                    // For Ultra mode, "unsynced" is everything if it's not empty
-                    if !um.history.data.read().is_empty() ||
-                       !um.cookies.data.read().is_empty() ||
-                       !um.cache.data.read().is_empty() ||
-                       !um.localstore.data.read().is_empty() ||
-                       !um.settings.data.read().is_empty() {
-                           return Err(ModeSwitchError::DataLoss);
-                       }
-                }
-            }
-        }
-
-        *current = match new_mode {
+        let new_instance = match new_mode {
             DatabaseMode::Persistent => CurrentMode::Persistent(PersistentMode::new(path, &self.config)),
             DatabaseMode::Ultra => CurrentMode::Ultra(UltraMode::new()),
         };
+
+        // Data Migration
+        match (&*current, &new_instance) {
+            (CurrentMode::Persistent(old_pm), CurrentMode::Ultra(new_um)) => {
+                for entry in old_pm.history.all_entries() { new_um.history.put(entry.key, entry.value); }
+                for entry in old_pm.cookies.all_entries() { new_um.cookies.put(entry.key, entry.value); }
+                for entry in old_pm.cache.all_entries() { new_um.cache.put(entry.key, entry.value); }
+                for entry in old_pm.localstore.all_entries() { new_um.localstore.put(entry.key, entry.value); }
+                for entry in old_pm.settings.all_entries() { new_um.settings.put(entry.key, entry.value); }
+            },
+            (CurrentMode::Ultra(old_um), CurrentMode::Persistent(new_pm)) => {
+                for (k, v) in old_um.history.all_entries() { new_pm.history.put(k, v).map_err(ModeSwitchError::IoError)?; }
+                for (k, v) in old_um.cookies.all_entries() { new_pm.cookies.put(k, v).map_err(ModeSwitchError::IoError)?; }
+                for (k, v) in old_um.cache.all_entries() { new_pm.cache.put(k, v).map_err(ModeSwitchError::IoError)?; }
+                for (k, v) in old_um.localstore.all_entries() { new_pm.localstore.put(k, v).map_err(ModeSwitchError::IoError)?; }
+                for (k, v) in old_um.settings.all_entries() { new_pm.settings.put(k, v).map_err(ModeSwitchError::IoError)?; }
+            },
+            _ => {} // Same mode or unexpected transition
+        }
+
+        *current = new_instance;
         Ok(())
     }
 }

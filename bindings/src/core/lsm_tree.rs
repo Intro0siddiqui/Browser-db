@@ -179,17 +179,13 @@ impl SSTable {
             let mut cursor = io::Cursor::new(data);
             
             if let Ok(log_entry) = BDBLogEntry::read(&mut cursor) {
-                let entry = KVEntry {
+                return Some(KVEntry {
                     key: log_entry.key,
                     value: log_entry.value,
                     timestamp: log_entry.timestamp,
                     entry_type: log_entry.entry_type,
                     deleted: log_entry.entry_type == EntryType::Delete,
-                };
-                if entry.deleted {
-                    return None;
-                }
-                return Some(entry);
+                });
             }
         }
         
@@ -314,6 +310,25 @@ impl LSMTree {
         }
         Ok(())
     }
+
+    pub fn clear(&self) -> io::Result<()> {
+        let mut mem = self.memtable.write();
+        mem.clear();
+        drop(mem);
+
+        let mut levels = Vec::new();
+        for l in &self.levels {
+            levels.push(l.write());
+        }
+
+        for mut level in levels {
+            for sstable in level.drain(..) {
+                let _ = fs::remove_file(&sstable.file_path);
+            }
+        }
+
+        Ok(())
+    }
     
     pub fn get(&self, key: &[u8]) -> Option<KVEntry> {
         // 1. MemTable
@@ -330,6 +345,9 @@ impl LSMTree {
             // Search newest SSTables first (usually end of list)
             for sstable in sstables.iter().rev() {
                 if let Some(entry) = sstable.get(key) {
+                    if entry.deleted {
+                        return None;
+                    }
                     return Some(entry);
                 }
             }
@@ -350,10 +368,22 @@ impl LSMTree {
     }
 
     pub fn all_entries(&self) -> Vec<KVEntry> {
+        self.scan_prefix(&[])
+    }
+
+    pub fn scan_prefix(&self, prefix: &[u8]) -> Vec<KVEntry> {
         let mut results: BTreeMap<Vec<u8>, KVEntry> = BTreeMap::new();
 
         // 1. MemTable
-        for (key, entry) in &self.memtable.read().entries {
+        let mem = self.memtable.read();
+        let range = if prefix.is_empty() {
+            mem.entries.range::<Vec<u8>, _>(..)
+        } else {
+            mem.entries.range(prefix.to_vec()..)
+        };
+
+        for (key, entry) in range {
+            if !prefix.is_empty() && !key.starts_with(prefix) { break; }
             results.insert(key.clone(), entry.clone());
         }
 
@@ -361,9 +391,19 @@ impl LSMTree {
         for level in &self.levels {
             let sstables = level.read();
             for sstable in sstables.iter().rev() {
-                for idx in &sstable.index {
+                let start_idx = if prefix.is_empty() {
+                    0
+                } else {
+                    match sstable.index.binary_search_by(|idx| idx.key.as_slice().cmp(prefix)) {
+                        Ok(i) => i,
+                        Err(i) => i,
+                    }
+                };
+
+                for idx in &sstable.index[start_idx..] {
+                    if !prefix.is_empty() && !idx.key.starts_with(prefix) { break; }
                     if !results.contains_key(&idx.key) {
-                        // Directly read from mmap as per nitpick
+                        // Directly read from mmap
                         let start = idx.position as usize;
                         let end = start + idx.size;
                         if end <= sstable.mmap.len() {
