@@ -327,6 +327,42 @@ impl LSMTree {
         
         None
     }
+
+    pub fn delete(&self, key: Vec<u8>) -> io::Result<()> {
+        let mut mem = self.memtable.write();
+        mem.put(key, Vec::new(), EntryType::Delete);
+
+        if mem.should_flush() {
+            drop(mem);
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn all_entries(&self) -> Vec<KVEntry> {
+        let mut results: BTreeMap<Vec<u8>, KVEntry> = BTreeMap::new();
+
+        // 1. MemTable
+        for (key, entry) in &self.memtable.read().entries {
+            results.insert(key.clone(), entry.clone());
+        }
+
+        // 2. Levels (newest SSTables first)
+        for level in &self.levels {
+            let sstables = level.read();
+            for sstable in sstables.iter().rev() {
+                for idx in &sstable.index {
+                    if !results.contains_key(&idx.key) {
+                        if let Some(entry) = sstable.get(&idx.key) {
+                            results.insert(idx.key.clone(), entry);
+                        }
+                    }
+                }
+            }
+        }
+
+        results.into_values().filter(|e| !e.deleted).collect()
+    }
     
     pub fn flush(&self) -> io::Result<()> {
         let mut mem = self.memtable.write();
@@ -358,4 +394,3 @@ impl Drop for LSMTree {
         }
     }
 }
-

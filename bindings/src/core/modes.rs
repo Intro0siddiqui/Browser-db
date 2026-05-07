@@ -37,6 +37,14 @@ impl UltraTable {
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.data.read().get(key).cloned()
     }
+
+    pub fn delete(&self, key: &[u8]) {
+        self.data.write().remove(key);
+    }
+
+    pub fn all_entries(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.data.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
 }
 
 pub struct PersistentMode {
@@ -90,6 +98,7 @@ pub enum CurrentMode {
 pub struct ModeSwitcher {
     pub current_mode: Arc<RwLock<CurrentMode>>,
     pub config: ModeConfig,
+    pub base_path: PathBuf,
 }
 
 impl ModeSwitcher {
@@ -102,6 +111,7 @@ impl ModeSwitcher {
         Self {
             current_mode: Arc::new(RwLock::new(current)),
             config,
+            base_path: path.to_path_buf(),
         }
     }
     
