@@ -22,6 +22,7 @@ pub mod cookie_flags {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub timestamp: u128,
+    pub url: String,
     pub url_hash: u128,
     pub title: String,
     pub visit_count: u32,
@@ -109,7 +110,7 @@ impl BrowserDB {
 
     pub fn set_mode(&self, mode: DatabaseMode) -> Result<(), Box<dyn std::error::Error>> {
         let path = self.switcher.base_path.clone();
-        self.switcher.switch_mode(mode, &path);
+        self.switcher.switch_mode(mode, &path)?;
         Ok(())
     }
 
@@ -150,31 +151,72 @@ impl BrowserDB {
             history_entries: history,
             cookie_entries: cookies,
             cache_entries: cache,
+            localstore_entries: localstore,
+            settings_entries: settings,
             memory_usage_mb: 0, // In-memory tables (Ultra) and MemTables are not easily tracked yet
             disk_usage_mb: disk_usage / 1024 / 1024,
         })
     }
     
     pub fn wipe(&self) -> Result<(), Box<dyn std::error::Error>> {
-        match &*self.switcher.current_mode.read() {
-            CurrentMode::Persistent(pm) => {
-                let keys: Vec<Vec<u8>> = pm.history.all_entries().into_iter().map(|e| e.key).collect();
-                for k in keys { pm.history.delete(k)?; }
-                let keys: Vec<Vec<u8>> = pm.cookies.all_entries().into_iter().map(|e| e.key).collect();
-                for k in keys { pm.cookies.delete(k)?; }
-                let keys: Vec<Vec<u8>> = pm.cache.all_entries().into_iter().map(|e| e.key).collect();
-                for k in keys { pm.cache.delete(k)?; }
-                let keys: Vec<Vec<u8>> = pm.localstore.all_entries().into_iter().map(|e| e.key).collect();
-                for k in keys { pm.localstore.delete(k)?; }
-                let keys: Vec<Vec<u8>> = pm.settings.all_entries().into_iter().map(|e| e.key).collect();
-                for k in keys { pm.settings.delete(k)?; }
+        let current_mode = self.switcher.current_mode.read();
+        match &*current_mode {
+            CurrentMode::Persistent(_) => {
+                // Collect keys while holding the lock
+                let (history_keys, cookies_keys, cache_keys, localstore_keys, settings_keys) = {
+                    if let CurrentMode::Persistent(pm) = &*current_mode {
+                        (
+                            pm.history.all_entries().into_iter().map(|e| e.key).collect::<Vec<_>>(),
+                            pm.cookies.all_entries().into_iter().map(|e| e.key).collect::<Vec<_>>(),
+                            pm.cache.all_entries().into_iter().map(|e| e.key).collect::<Vec<_>>(),
+                            pm.localstore.all_entries().into_iter().map(|e| e.key).collect::<Vec<_>>(),
+                            pm.settings.all_entries().into_iter().map(|e| e.key).collect::<Vec<_>>(),
+                        )
+                    } else {
+                        unreachable!()
+                    }
+                };
+
+                // Release lock
+                drop(current_mode);
+
+                for k in history_keys {
+                    if let CurrentMode::Persistent(pm) = &*self.switcher.current_mode.read() {
+                        pm.history.delete(k)?;
+                    }
+                }
+                for k in cookies_keys {
+                    if let CurrentMode::Persistent(pm) = &*self.switcher.current_mode.read() {
+                        pm.cookies.delete(k)?;
+                    }
+                }
+                for k in cache_keys {
+                    if let CurrentMode::Persistent(pm) = &*self.switcher.current_mode.read() {
+                        pm.cache.delete(k)?;
+                    }
+                }
+                for k in localstore_keys {
+                    if let CurrentMode::Persistent(pm) = &*self.switcher.current_mode.read() {
+                        pm.localstore.delete(k)?;
+                    }
+                }
+                for k in settings_keys {
+                    if let CurrentMode::Persistent(pm) = &*self.switcher.current_mode.read() {
+                        pm.settings.delete(k)?;
+                    }
+                }
             },
             CurrentMode::Ultra(um) => {
                 um.history.data.write().clear();
+                um.history.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
                 um.cookies.data.write().clear();
+                um.cookies.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
                 um.cache.data.write().clear();
+                um.cache.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
                 um.localstore.data.write().clear();
+                um.localstore.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
                 um.settings.data.write().clear();
+                um.settings.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
             }
         }
         Ok(())
@@ -187,6 +229,8 @@ pub struct DatabaseStats {
     pub history_entries: u64,
     pub cookie_entries: u64,
     pub cache_entries: u64,
+    pub localstore_entries: u64,
+    pub settings_entries: u64,
     pub memory_usage_mb: u64,
     pub disk_usage_mb: u64,
 }
@@ -196,7 +240,7 @@ impl<'a> HistoryTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
         match &*self.db.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.history.all_entries().len()),
-            CurrentMode::Ultra(um) => Ok(um.history.all_entries().len()),
+            CurrentMode::Ultra(um) => Ok(um.history.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
         }
     }
 
@@ -231,7 +275,8 @@ impl<'a> HistoryTable<'a> {
     }
 
     pub fn wipe_domain(&self, domain: &str) -> Result<usize, Box<dyn std::error::Error>> {
-        let all_entries: Vec<(Vec<u8>, Vec<u8>)> = match &*self.db.switcher.current_mode.read() {
+        let current_mode = self.db.switcher.current_mode.read();
+        let all_entries: Vec<(Vec<u8>, Vec<u8>)> = match &*current_mode {
             CurrentMode::Persistent(pm) => {
                 pm.history.all_entries().into_iter().map(|e| (e.key, e.value)).collect()
             },
@@ -241,8 +286,8 @@ impl<'a> HistoryTable<'a> {
         let mut count = 0;
         for (key, value) in all_entries {
             let entry: HistoryEntry = bincode::deserialize(&value)?;
-            if entry.title.contains(domain) {
-                match &*self.db.switcher.current_mode.read() {
+            if entry.url.contains(domain) {
+                match &*current_mode {
                     CurrentMode::Persistent(pm) => pm.history.delete(key)?,
                     CurrentMode::Ultra(um) => um.history.delete(&key),
                 }
@@ -258,7 +303,7 @@ impl<'a> CookiesTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
         match &*self.db.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.cookies.all_entries().len()),
-            CurrentMode::Ultra(um) => Ok(um.cookies.all_entries().len()),
+            CurrentMode::Ultra(um) => Ok(um.cookies.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
         }
     }
 
@@ -278,7 +323,7 @@ impl<'a> CacheTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
         match &*self.db.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.cache.all_entries().len()),
-            CurrentMode::Ultra(um) => Ok(um.cache.all_entries().len()),
+            CurrentMode::Ultra(um) => Ok(um.cache.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
         }
     }
 
@@ -313,7 +358,7 @@ impl<'a> LocalStoreTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
         match &*self.db.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.localstore.all_entries().len()),
-            CurrentMode::Ultra(um) => Ok(um.localstore.all_entries().len()),
+            CurrentMode::Ultra(um) => Ok(um.localstore.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
         }
     }
 
@@ -353,7 +398,7 @@ impl<'a> SettingsTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
         match &*self.db.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.settings.all_entries().len()),
-            CurrentMode::Ultra(um) => Ok(um.settings.all_entries().len()),
+            CurrentMode::Ultra(um) => Ok(um.settings.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
         }
     }
     pub fn set(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {

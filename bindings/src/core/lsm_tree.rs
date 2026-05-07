@@ -29,6 +29,7 @@ pub struct MemTable {
     pub entries: BTreeMap<Vec<u8>, KVEntry>,
     pub max_size: usize,
     pub current_size: usize,
+    pub entry_count: usize,
     pub table_type: TableType,
 }
 
@@ -38,6 +39,7 @@ impl MemTable {
             entries: BTreeMap::new(),
             max_size,
             current_size: 0,
+            entry_count: 0,
             table_type,
         }
     }
@@ -56,6 +58,8 @@ impl MemTable {
         // Update size: subtract old entry size if exists, add new entry size
         if let Some(old_entry) = self.entries.insert(key, entry) {
             self.current_size -= old_entry.size();
+        } else {
+            self.entry_count += 1;
         }
         self.current_size += new_size;
     }
@@ -71,6 +75,7 @@ impl MemTable {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.current_size = 0;
+        self.entry_count = 0;
     }
 }
 
@@ -115,8 +120,6 @@ impl SSTable {
         let mut offset = 0u64;
         
         for entry in entries.values() {
-            if entry.deleted { continue; }
-            
             let mut bdb_entry = BDBLogEntry {
                 entry_type: entry.entry_type,
                 key: entry.key.clone(),
@@ -176,13 +179,17 @@ impl SSTable {
             let mut cursor = io::Cursor::new(data);
             
             if let Ok(log_entry) = BDBLogEntry::read(&mut cursor) {
-                 return Some(KVEntry {
-                     key: log_entry.key,
-                     value: log_entry.value,
-                     timestamp: log_entry.timestamp,
-                     entry_type: log_entry.entry_type,
-                     deleted: log_entry.entry_type == EntryType::Delete,
-                 });
+                let entry = KVEntry {
+                    key: log_entry.key,
+                    value: log_entry.value,
+                    timestamp: log_entry.timestamp,
+                    entry_type: log_entry.entry_type,
+                    deleted: log_entry.entry_type == EntryType::Delete,
+                };
+                if entry.deleted {
+                    return None;
+                }
+                return Some(entry);
             }
         }
         
@@ -311,6 +318,9 @@ impl LSMTree {
     pub fn get(&self, key: &[u8]) -> Option<KVEntry> {
         // 1. MemTable
         if let Some(entry) = self.memtable.read().get(key) {
+            if entry.deleted {
+                return None;
+            }
             return Some(entry);
         }
         
@@ -353,8 +363,21 @@ impl LSMTree {
             for sstable in sstables.iter().rev() {
                 for idx in &sstable.index {
                     if !results.contains_key(&idx.key) {
-                        if let Some(entry) = sstable.get(&idx.key) {
-                            results.insert(idx.key.clone(), entry);
+                        // Directly read from mmap as per nitpick
+                        let start = idx.position as usize;
+                        let end = start + idx.size;
+                        if end <= sstable.mmap.len() {
+                            let data = &sstable.mmap[start..end];
+                            let mut cursor = io::Cursor::new(data);
+                            if let Ok(log_entry) = BDBLogEntry::read(&mut cursor) {
+                                results.insert(idx.key.clone(), KVEntry {
+                                    key: log_entry.key,
+                                    value: log_entry.value,
+                                    timestamp: log_entry.timestamp,
+                                    entry_type: log_entry.entry_type,
+                                    deleted: log_entry.entry_type == EntryType::Delete,
+                                });
+                            }
                         }
                     }
                 }

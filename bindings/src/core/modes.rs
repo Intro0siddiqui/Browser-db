@@ -6,11 +6,30 @@ use parking_lot::RwLock;
 use crate::core::lsm_tree::LSMTree;
 use crate::core::format::TableType;
 
+use std::fmt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseMode {
     Persistent,
     Ultra,
 }
+
+#[derive(Debug)]
+pub enum ModeSwitchError {
+    DataLoss,
+    IoError(std::io::Error),
+}
+
+impl fmt::Display for ModeSwitchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ModeSwitchError::DataLoss => write!(f, "Potential data loss detected"),
+            ModeSwitchError::IoError(e) => write!(f, "IO error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for ModeSwitchError {}
 
 #[derive(Debug, Clone)]
 pub struct ModeConfig {
@@ -21,17 +40,21 @@ pub struct ModeConfig {
 
 pub struct UltraTable {
     pub data: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
+    pub entry_count: std::sync::atomic::AtomicUsize,
 }
 
 impl UltraTable {
     pub fn new() -> Self {
         Self {
             data: RwLock::new(HashMap::new()),
+            entry_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
-        self.data.write().insert(key, value);
+        if self.data.write().insert(key, value).is_none() {
+            self.entry_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
@@ -39,7 +62,9 @@ impl UltraTable {
     }
 
     pub fn delete(&self, key: &[u8]) {
-        self.data.write().remove(key);
+        if self.data.write().remove(key).is_some() {
+            self.entry_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     pub fn all_entries(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -57,6 +82,14 @@ pub struct PersistentMode {
 }
 
 impl PersistentMode {
+    pub fn has_unsynced_data(&self) -> bool {
+        !self.history.memtable.read().entries.is_empty() ||
+        !self.cookies.memtable.read().entries.is_empty() ||
+        !self.cache.memtable.read().entries.is_empty() ||
+        !self.localstore.memtable.read().entries.is_empty() ||
+        !self.settings.memtable.read().entries.is_empty()
+    }
+
     pub fn new(path: &Path, config: &ModeConfig) -> Self {
         let max_mem = config.max_memory / 5; // Divide memory among tables
         Self {
@@ -115,16 +148,34 @@ impl ModeSwitcher {
         }
     }
     
-    pub fn switch_mode(&self, new_mode: DatabaseMode, path: &Path) {
+    pub fn switch_mode(&self, new_mode: DatabaseMode, path: &Path) -> Result<(), ModeSwitchError> {
         let mut current = self.current_mode.write();
         
-        // Data Migration Logic (Simplified)
-        // In a real app, we would iterate all data from old mode and put into new mode.
-        // For now, we just initialize the new mode.
-        
+        // Check for unsynced data to prevent data loss as per nitpick
+        match &*current {
+            CurrentMode::Persistent(pm) => {
+                if new_mode == DatabaseMode::Ultra && pm.has_unsynced_data() {
+                    return Err(ModeSwitchError::DataLoss);
+                }
+            },
+            CurrentMode::Ultra(um) => {
+                if new_mode == DatabaseMode::Persistent {
+                    // For Ultra mode, "unsynced" is everything if it's not empty
+                    if !um.history.data.read().is_empty() ||
+                       !um.cookies.data.read().is_empty() ||
+                       !um.cache.data.read().is_empty() ||
+                       !um.localstore.data.read().is_empty() ||
+                       !um.settings.data.read().is_empty() {
+                           return Err(ModeSwitchError::DataLoss);
+                       }
+                }
+            }
+        }
+
         *current = match new_mode {
             DatabaseMode::Persistent => CurrentMode::Persistent(PersistentMode::new(path, &self.config)),
             DatabaseMode::Ultra => CurrentMode::Ultra(UltraMode::new()),
         };
+        Ok(())
     }
 }
