@@ -4,10 +4,11 @@ pub mod sql;
 use std::path::Path;
 use std::sync::Arc;
 use std::fs;
+use crate::core::format::{EntryType};
 use serde::{Serialize, Deserialize};
 
 pub use crate::core::modes::{DatabaseMode, ModeConfig};
-use crate::core::modes::{ModeSwitcher, CurrentMode};
+use crate::core::modes::{ModeSwitcher, CurrentMode, PersistentMode};
 
 pub mod types {
     pub use super::{HistoryEntry, CookieEntry, CacheEntry, LocalStoreEntry, SettingEntry};
@@ -81,6 +82,10 @@ pub struct BrowserDB {
 
 impl BrowserDB {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open_with_encryption(path, None)
+    }
+
+    pub fn open_with_encryption<P: AsRef<Path>>(path: P, encryption_key: Option<[u8; 32]>) -> Result<Self, Box<dyn std::error::Error>> {
         let path = path.as_ref();
         if !path.exists() {
             fs::create_dir_all(path)?;
@@ -92,7 +97,13 @@ impl BrowserDB {
             enable_heat_tracking: true,
         };
         
-        let switcher = ModeSwitcher::new(path, DatabaseMode::Persistent, config);
+        let switcher = ModeSwitcher::new(path, DatabaseMode::Persistent, config.clone());
+
+        if let Some(key) = encryption_key {
+            let mut current = switcher.current_mode.write();
+            *current = CurrentMode::Persistent(PersistentMode::new_with_encryption(path, &config, Some(key)));
+        }
+
         Ok(Self {
             switcher: Arc::new(switcher),
         })
@@ -103,6 +114,8 @@ impl BrowserDB {
     pub fn cache(&self) -> CacheTable<'_> { CacheTable { db: self } }
     pub fn localstore(&self) -> LocalStoreTable<'_> { LocalStoreTable { db: self } }
     pub fn settings(&self) -> SettingsTable<'_> { SettingsTable { db: self } }
+
+    pub fn new_batch(&self) -> Batch<'_> { Batch::new(self) }
     
     pub fn sql(self: Arc<Self>) -> sql::SqlEngine {
         sql::SqlEngine::new(self)
@@ -158,6 +171,48 @@ impl BrowserDB {
         })
     }
     
+    pub fn backup<P: AsRef<Path>>(&self, backup_path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let backup_path = backup_path.as_ref();
+        if !backup_path.exists() {
+            fs::create_dir_all(backup_path)?;
+        }
+
+        let base_path = &self.switcher.base_path;
+        for entry in fs::read_dir(base_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let file_name = path.file_name().ok_or("Invalid filename")?;
+                let dest_path = backup_path.join(file_name);
+                fs::copy(&path, &dest_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn repair(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut repaired_count = 0;
+        let base_path = &self.switcher.base_path;
+
+        // Simplified repair: check all .sst files
+        for entry in fs::read_dir(base_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "sst") {
+                // If we can't open it, it might be corrupted
+                if let Err(_) = crate::core::lsm_tree::SSTable::open(path.clone(), 0) {
+                    // In a real system, we might try to recover data from the file
+                    // For now, we just move it to a .corrupted file and mark it for repair
+                    let mut new_path = path.clone();
+                    new_path.set_extension("sst.corrupted");
+                    fs::rename(&path, &new_path)?;
+                    repaired_count += 1;
+                }
+            }
+        }
+        Ok(repaired_count)
+    }
+
     pub fn wipe(&self) -> Result<(), Box<dyn std::error::Error>> {
         let current_mode = self.switcher.current_mode.read();
         match &*current_mode {
@@ -356,6 +411,106 @@ impl<'a> LocalStoreTable<'a> {
             results.push(entry);
         }
         Ok(results)
+    }
+}
+
+pub struct Batch<'a> {
+    db: &'a BrowserDB,
+    operations: Vec<(TableType, EntryType, Vec<u8>, Vec<u8>)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TableType {
+    History,
+    Cookies,
+    Cache,
+    LocalStore,
+    Settings,
+}
+
+impl<'a> Batch<'a> {
+    pub fn new(db: &'a BrowserDB) -> Self {
+        Self { db, operations: Vec::new() }
+    }
+
+    pub fn put_history(&mut self, entry: &HistoryEntry) -> Result<&mut Self, Box<dyn std::error::Error>> {
+        let key = bincode::serialize(&entry.url_hash)?;
+        let value = bincode::serialize(entry)?;
+        self.operations.push((TableType::History, EntryType::Insert, key, value));
+        Ok(self)
+    }
+
+    pub fn set_setting(&mut self, key: &str, value: &str) -> &mut Self {
+        self.operations.push((TableType::Settings, EntryType::Insert, key.as_bytes().to_vec(), value.as_bytes().to_vec()));
+        self
+    }
+
+    pub fn delete_setting(&mut self, key: &str) -> &mut Self {
+        self.operations.push((TableType::Settings, EntryType::Delete, key.as_bytes().to_vec(), Vec::new()));
+        self
+    }
+
+    pub fn commit(self) -> Result<(), Box<dyn std::error::Error>> {
+        // Group by table
+        let mut history_ops = Vec::new();
+        let mut cookies_ops = Vec::new();
+        let mut cache_ops = Vec::new();
+        let mut localstore_ops = Vec::new();
+        let mut settings_ops = Vec::new();
+
+        for (table, entry_type, key, value) in self.operations {
+            match table {
+                TableType::History => history_ops.push((entry_type, key, value)),
+                TableType::Cookies => cookies_ops.push((entry_type, key, value)),
+                TableType::Cache => cache_ops.push((entry_type, key, value)),
+                TableType::LocalStore => localstore_ops.push((entry_type, key, value)),
+                TableType::Settings => settings_ops.push((entry_type, key, value)),
+            }
+        }
+
+        let current_mode = self.db.switcher.current_mode.read();
+        match &*current_mode {
+            CurrentMode::Persistent(pm) => {
+                if !history_ops.is_empty() { pm.history.apply_batch(history_ops)?; }
+                if !cookies_ops.is_empty() { pm.cookies.apply_batch(cookies_ops)?; }
+                if !cache_ops.is_empty() { pm.cache.apply_batch(cache_ops)?; }
+                if !localstore_ops.is_empty() { pm.localstore.apply_batch(localstore_ops)?; }
+                if !settings_ops.is_empty() { pm.settings.apply_batch(settings_ops)?; }
+            },
+            CurrentMode::Ultra(um) => {
+                for (op, key, value) in history_ops {
+                    match op {
+                        EntryType::Delete => um.history.delete(&key),
+                        _ => um.history.put(key, value),
+                    }
+                }
+                for (op, key, value) in cookies_ops {
+                    match op {
+                        EntryType::Delete => um.cookies.delete(&key),
+                        _ => um.cookies.put(key, value),
+                    }
+                }
+                for (op, key, value) in cache_ops {
+                    match op {
+                        EntryType::Delete => um.cache.delete(&key),
+                        _ => um.cache.put(key, value),
+                    }
+                }
+                for (op, key, value) in localstore_ops {
+                    match op {
+                        EntryType::Delete => um.localstore.delete(&key),
+                        _ => um.localstore.put(key, value),
+                    }
+                }
+                for (op, key, value) in settings_ops {
+                    match op {
+                        EntryType::Delete => um.settings.delete(&key),
+                        _ => um.settings.put(key, value),
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

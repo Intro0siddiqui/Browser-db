@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting SQL Subsystem Demo");
 
     // 2. Create Table
-    let create_query = "CREATE TABLE users (id INT PRIMARY_KEY, name TEXT, active BOOL)";
+    let create_query = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active BOOLEAN)";
     match sql.execute(create_query) {
         Ok(msg) => println!("✅ {}", msg),
         Err(e) => println!("❌ Create Failed: {}", e),

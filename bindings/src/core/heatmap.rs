@@ -28,9 +28,9 @@ pub struct HeatEntry {
 }
 
 pub struct HeatTracker {
-    max_entries: usize,
-    decay_factor: f64,
-    hot_threshold: u32,
+    pub max_entries: usize,
+    pub decay_factor: f64,
+    pub hot_threshold: u32,
     last_decay_time: u64,
     heat_entries: HashMap<Vec<u8>, HeatEntry>,
 }
@@ -117,8 +117,9 @@ pub struct BloomFilter {
 
 impl BloomFilter {
     pub fn new(expected_elements: usize, false_positive_rate: f64) -> Self {
+        let expected_elements = expected_elements.max(1);
         let optimal_bit_size = -((expected_elements as f64 * false_positive_rate.ln()) / (2.0f64.ln().powi(2))) as usize;
-        let bit_array_size = (optimal_bit_size + 7) / 8;
+        let bit_array_size = ((optimal_bit_size + 7) / 8).max(1);
         let k = ((optimal_bit_size as f64 / expected_elements as f64) * 2.0f64.ln()) as u32;
         
         Self {

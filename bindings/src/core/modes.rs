@@ -91,14 +91,18 @@ impl PersistentMode {
     }
 
     pub fn new(path: &Path, config: &ModeConfig) -> Self {
+        Self::new_with_encryption(path, config, None)
+    }
+
+    pub fn new_with_encryption(path: &Path, config: &ModeConfig, encryption_key: Option<[u8; 32]>) -> Self {
         let max_mem = config.max_memory / 5; // Divide memory among tables
         Self {
             path: path.to_path_buf(),
-            history: LSMTree::new(path, TableType::History, max_mem),
-            cookies: LSMTree::new(path, TableType::Cookies, max_mem),
-            cache: LSMTree::new(path, TableType::Cache, max_mem),
-            localstore: LSMTree::new(path, TableType::LocalStore, max_mem),
-            settings: LSMTree::new(path, TableType::Settings, max_mem),
+            history: LSMTree::new_with_encryption(path, TableType::History, max_mem, encryption_key),
+            cookies: LSMTree::new_with_encryption(path, TableType::Cookies, max_mem, encryption_key),
+            cache: LSMTree::new_with_encryption(path, TableType::Cache, max_mem, encryption_key),
+            localstore: LSMTree::new_with_encryption(path, TableType::LocalStore, max_mem, encryption_key),
+            settings: LSMTree::new_with_encryption(path, TableType::Settings, max_mem, encryption_key),
         }
     }
 }
