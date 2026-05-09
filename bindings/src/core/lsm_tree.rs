@@ -8,7 +8,8 @@ use parking_lot::RwLock;
 use memmap2::Mmap;
 
 use crate::core::format::{BDBLogEntry, EntryType, TableType};
-use crate::core::heatmap::BloomFilter;
+use crate::core::heatmap::{BloomFilter, HeatTracker, QueryType};
+use crate::core::wal::WALManager;
 
 #[derive(Debug, Clone)]
 pub struct KVEntry {
@@ -237,11 +238,18 @@ impl SSTable {
     }
 }
 
+#[derive(Clone)]
 pub struct LSMTree {
+    pub inner: Arc<LSMTreeInner>,
+}
+
+pub struct LSMTreeInner {
     pub memtable: RwLock<MemTable>,
     pub levels: Vec<RwLock<Vec<Arc<SSTable>>>>, // 10 levels
     pub base_path: PathBuf,
     pub table_type: TableType,
+    pub wal: RwLock<WALManager>,
+    pub heat_tracker: RwLock<HeatTracker>,
 }
 
 impl LSMTree {
@@ -249,6 +257,24 @@ impl LSMTree {
         let mut levels = Vec::with_capacity(10);
         for _ in 0..10 {
             levels.push(RwLock::new(Vec::new()));
+        }
+
+        let wal_path = base_path.join(format!("{}.wal", match table_type {
+            TableType::History => "history",
+            TableType::Cookies => "cookies",
+            TableType::Cache => "cache",
+            TableType::LocalStore => "localstore",
+            TableType::Settings => "settings",
+        }));
+        let wal = WALManager::new(&wal_path).expect("Failed to initialize WAL");
+
+        let mut memtable = MemTable::new(max_memtable_size, table_type);
+
+        // Recover from WAL
+        if let Ok(entries) = wal.read_all() {
+            for entry in entries {
+                memtable.put(entry.key, entry.value, entry.entry_type);
+            }
         }
 
         // Recover existing SSTables
@@ -291,15 +317,22 @@ impl LSMTree {
         }
         
         Self {
-            memtable: RwLock::new(MemTable::new(max_memtable_size, table_type)),
-            levels,
-            base_path: base_path.to_path_buf(),
-            table_type,
+            inner: Arc::new(LSMTreeInner {
+                memtable: RwLock::new(memtable),
+                levels,
+                base_path: base_path.to_path_buf(),
+                table_type,
+                wal: RwLock::new(wal),
+                heat_tracker: RwLock::new(HeatTracker::new(10000)),
+            })
         }
     }
     
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> io::Result<()> {
-        let mut mem = self.memtable.write();
+        let mut wal_entry = BDBLogEntry::new(EntryType::Insert, key.clone(), value.clone());
+        self.inner.wal.write().log(&mut wal_entry)?;
+
+        let mut mem = self.inner.memtable.write();
         mem.put(key, value, EntryType::Insert);
         
         if mem.should_flush() {
@@ -310,12 +343,12 @@ impl LSMTree {
     }
 
     pub fn clear(&self) -> io::Result<()> {
-        let mut mem = self.memtable.write();
+        let mut mem = self.inner.memtable.write();
         mem.clear();
         drop(mem);
 
         let mut levels = Vec::new();
-        for l in &self.levels {
+        for l in &self.inner.levels {
             levels.push(l.write());
         }
 
@@ -329,8 +362,10 @@ impl LSMTree {
     }
     
     pub fn get(&self, key: &[u8]) -> Option<KVEntry> {
+        self.inner.heat_tracker.write().record_access(key, QueryType::Read);
+
         // 1. MemTable
-        if let Some(entry) = self.memtable.read().get(key) {
+        if let Some(entry) = self.inner.memtable.read().get(key) {
             if entry.deleted {
                 return None;
             }
@@ -338,7 +373,7 @@ impl LSMTree {
         }
         
         // 2. Levels (0 to 9)
-        for level in &self.levels {
+        for level in &self.inner.levels {
             let sstables = level.read();
             // Search newest SSTables first (usually end of list)
             for sstable in sstables.iter().rev() {
@@ -355,7 +390,10 @@ impl LSMTree {
     }
 
     pub fn delete(&self, key: Vec<u8>) -> io::Result<()> {
-        let mut mem = self.memtable.write();
+        let mut wal_entry = BDBLogEntry::new(EntryType::Delete, key.clone(), Vec::new());
+        self.inner.wal.write().log(&mut wal_entry)?;
+
+        let mut mem = self.inner.memtable.write();
         mem.put(key, Vec::new(), EntryType::Delete);
 
         if mem.should_flush() {
@@ -379,7 +417,7 @@ impl LSMTree {
 
         // 1. MemTable
         {
-            let mem = self.memtable.read();
+            let mem = self.inner.memtable.read();
             let range = if prefix.is_empty() {
                 mem.entries.range::<Vec<u8>, _>(..)
             } else {
@@ -397,7 +435,7 @@ impl LSMTree {
         }
 
         // 2. Levels (newest SSTables first)
-        for level in &self.levels {
+        for level in &self.inner.levels {
             let sstables = level.read();
             for sstable in sstables.iter().rev() {
                 let start_idx = if prefix.is_empty() {
@@ -429,7 +467,7 @@ impl LSMTree {
     }
     
     pub fn flush(&self) -> io::Result<()> {
-        let mut mem = self.memtable.write();
+        let mut mem = self.inner.memtable.write();
         if mem.entries.is_empty() { return Ok(()); }
         
         // Clone entries for flushing
@@ -438,12 +476,131 @@ impl LSMTree {
         drop(mem); // Unlock MemTable
         
         // Create SSTable (Level 0)
-        let sstable = Arc::new(SSTable::create(0, &entries, &self.base_path, self.table_type)?);
+        let sstable = Arc::new(SSTable::create(0, &entries, &self.inner.base_path, self.inner.table_type)?);
         
         // Add to Level 0
-        self.levels[0].write().push(sstable);
+        {
+            let mut l0 = self.inner.levels[0].write();
+            l0.push(sstable);
+
+            // Check for compaction
+            // In a real scenario, we'd load this from browserdb.toml
+            let max_l0_files = 4;
+
+            if l0.len() >= max_l0_files {
+                // Prioritize compaction using HeatTracker data
+                // We'll sort L0 files by their aggregate "coldness" (simulated here)
+                // or just take them all if they hit the threshold.
+                let mut tables_to_compact = l0.clone();
+
+                // Use HeatTracker to influence compaction priority
+                {
+                    let heat = self.inner.heat_tracker.read();
+                    tables_to_compact.sort_by_cached_key(|t| {
+                        let mut total_heat = 0u64;
+                        for idx in &t.index {
+                            total_heat += heat.get_heat(&idx.key) as u64;
+                        }
+                        total_heat / t.index.len().max(1) as u64
+                    });
+                }
+
+                // For Leveled compaction L0 -> L1, we usually take all L0 files
+                let tables_to_compact = l0.clone();
+                drop(l0);
+
+                let inner = Arc::clone(&self.inner);
+                std::thread::spawn(move || {
+                    // Record compaction access in heat tracker
+                    for table in &tables_to_compact {
+                        let mut ht = inner.heat_tracker.write();
+                        for idx in &table.index {
+                            ht.record_access(&idx.key, QueryType::Compact);
+                        }
+                    }
+
+                    if let Ok(new_sst) = inner.merge_sstables(1, tables_to_compact.clone()) {
+                        let mut l0 = inner.levels[0].write();
+                        let mut l1 = inner.levels[1].write();
+
+                        l0.retain(|t| !tables_to_compact.iter().any(|tc| tc.file_path == t.file_path));
+                        l1.push(new_sst);
+                    }
+                });
+            }
+        }
+
+        // Truncate WAL after successful flush
+        self.inner.wal.write().truncate()?;
         
         Ok(())
+    }
+
+    pub fn merge_sstables(&self, level: u8, tables: Vec<Arc<SSTable>>) -> io::Result<Arc<SSTable>> {
+        self.inner.merge_sstables(level, tables)
+    }
+}
+
+impl LSMTreeInner {
+    pub fn merge_sstables(&self, level: u8, tables: Vec<Arc<SSTable>>) -> io::Result<Arc<SSTable>> {
+        let is_final_level = level == 9;
+
+        // Multi-way merge sort
+        let mut iterators: Vec<_> = tables.iter().map(|t| t.index.iter().peekable()).collect();
+        let mut merged_entries: BTreeMap<Vec<u8>, KVEntry> = BTreeMap::new();
+
+        loop {
+            let mut min_key: Option<&Vec<u8>> = None;
+
+            for iter in iterators.iter_mut() {
+                if let Some(idx_entry) = iter.peek() {
+                    match min_key {
+                        None => {
+                            min_key = Some(&idx_entry.key);
+                        }
+                        Some(key) => {
+                            if idx_entry.key < *key {
+                                min_key = Some(&idx_entry.key);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(key) = min_key {
+                let key = key.clone();
+                let mut best_entry: Option<KVEntry> = None;
+
+                for (i, iter) in iterators.iter_mut().enumerate() {
+                    if let Some(peeked) = iter.peek() {
+                        if peeked.key == key {
+                            let entry = tables[i].get_at_index(peeked).unwrap();
+                            if best_entry.is_none() || entry.timestamp > best_entry.as_ref().unwrap().timestamp {
+                                best_entry = Some(entry);
+                            }
+                            iter.next(); // Advance all iterators with this key
+                        }
+                    }
+                }
+
+                if let Some(entry) = best_entry {
+                    if !is_final_level || !entry.deleted {
+                        merged_entries.insert(key, entry);
+                    }
+                }
+            } else {
+                break; // No more entries
+            }
+        }
+
+        let new_sstable = Arc::new(SSTable::create(level, &merged_entries, &self.base_path, self.table_type)?);
+
+        // Delete old sstables
+        for table in tables {
+            let _ = fs::remove_file(&table.file_path);
+        }
+
+        Ok(new_sstable)
     }
 }
 

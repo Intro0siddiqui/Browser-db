@@ -65,6 +65,7 @@ bloom_filter_fpr = 0.01
 
 [optimization]
 # 优化参数
+max_level0_files = 4
 compaction_cpu_limit = 0.05
 heat_decay_rate = 0.1
 hot_threshold = 0.7

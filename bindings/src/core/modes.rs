@@ -83,11 +83,11 @@ pub struct PersistentMode {
 
 impl PersistentMode {
     pub fn has_unsynced_data(&self) -> bool {
-        !self.history.memtable.read().entries.is_empty() ||
-        !self.cookies.memtable.read().entries.is_empty() ||
-        !self.cache.memtable.read().entries.is_empty() ||
-        !self.localstore.memtable.read().entries.is_empty() ||
-        !self.settings.memtable.read().entries.is_empty()
+        !self.history.inner.memtable.read().entries.is_empty() ||
+        !self.cookies.inner.memtable.read().entries.is_empty() ||
+        !self.cache.inner.memtable.read().entries.is_empty() ||
+        !self.localstore.inner.memtable.read().entries.is_empty() ||
+        !self.settings.inner.memtable.read().entries.is_empty()
     }
 
     pub fn new(path: &Path, config: &ModeConfig) -> Self {
