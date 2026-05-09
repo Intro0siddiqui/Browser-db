@@ -7,7 +7,6 @@ Understanding how BrowserDB is organized helps developers navigate, contribute, 
 ```
 BrowserDB/
 ├── 🦀 Core Engine (Rust)          # High-performance database engine
-├── 🧩 SQL Subsystem (Rust)        # Modular SQL Layer
 ├── 💡 Examples                    # Usage examples and tutorials
 ├── 🛠️ Scripts                     # Build and deployment automation
 └── 📚 Documentation               # User and developer guides
@@ -27,14 +26,12 @@ The heart of BrowserDB - written in Pure Rust for maximum performance and safety
 **Key Responsibilities:**
 - Database lifecycle management (open, close)
 - Table accessors (history, cookies, etc.)
-- SQL engine initialization
 - Mode switching integration
 
 **Key Functions:**
 ```rust
 pub fn open(path: impl AsRef<Path>) -> Result<Self, Error>
 pub fn history(&self) -> HistoryTable<'_>
-pub fn sql(self: Arc<Self>) -> SqlEngine
 ```
 
 #### `core/lsm_tree.rs` - Storage Engine
@@ -99,21 +96,6 @@ pub struct SSTable {
 
 ---
 
-### 🧩 SQL Subsystem (`src/sql/`)
-
-**Purpose:** A modular SQL engine built on top of the core Key-Value store.
-
-#### `mod.rs` - SQL Engine
-**Key Responsibilities:**
-- Parsing SQL (`CREATE`, `INSERT`, `SELECT`)
-- Managing Schemas (stored as special KV entries)
-- Converting SQL rows to binary KV data
-
-**Key Functions:**
-```rust
-pub fn execute(&self, query: &str) -> Result<String, Error>
-```
-
 ---
 
 ## 💡 Examples Directory (`bindings/examples/`)
@@ -127,10 +109,6 @@ pub fn execute(&self, query: &str) -> Result<String, Error>
 #### `stress_test.rs`
 - Performance benchmarking script
 - Verifies 700k+ ops/sec throughput
-
-#### `sql_demo.rs`
-- Demonstrates the modular SQL subsystem
-- Creating tables and querying data
 
 ---
 

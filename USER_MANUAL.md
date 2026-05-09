@@ -6,10 +6,9 @@ Complete guide to using BrowserDB effectively in your applications.
 
 1. [Getting Started](#getting-started)
 2. [Core Data Tables](#core-data-tables)
-3. [SQL Subsystem](#sql-subsystem)
-4. [Performance Optimization](#performance-optimization)
-5. [Error Handling](#error-handling)
-6. [Best Practices](#best-practices)
+3. [Performance Optimization](#performance-optimization)
+4. [Error Handling](#error-handling)
+5. [Best Practices](#best-practices)
 
 ---
 
@@ -94,47 +93,10 @@ if let Some(theme) = db.settings().get("theme")? {
 
 ---
 
-## 🧩 SQL Subsystem
-
-For applications requiring structured queries or SQL compatibility, BrowserDB provides a modular SQL engine.
-
-### Enabling SQL
-```rust
-use std::sync::Arc;
-
-// The SQL engine requires an Arc<BrowserDB>
-let db_arc = Arc::new(db);
-let sql = db_arc.sql();
-```
-
-### SQL Operations
-
-#### Create Table
-```rust
-sql.execute("CREATE TABLE users (id INT PRIMARY_KEY, name TEXT, active BOOL)")?;
-```
-
-#### Insert Data
-```rust
-sql.execute("INSERT INTO users VALUES (1, 'Alice', true)")?;
-sql.execute("INSERT INTO users VALUES (2, 'Bob', false)")?;
-```
-
-#### Query Data (Select)
-```rust
-let result = sql.execute("SELECT * FROM users WHERE id = 1")?;
-println!("Result: {}", result);
-```
-
-**Note:** The SQL subsystem is optimized for flexibility. For raw maximum throughput (700k+ ops/sec), use the Core Data Tables API directly.
-
----
-
 ## ⚡ Performance Optimization
 
 ### 1. Use the Right Tool
 - **Raw Core Tables:** Use for high-frequency logging, caching, and history (700k+ writes/sec).
-- **SQL Layer:** Use for complex user data, configurations, and structured queries (~250k writes/sec).
 
 ### 2. Persistence
 BrowserDB uses an LSM-Tree which buffers writes in memory (MemTable). Data is automatically flushed to disk when:
@@ -166,7 +128,6 @@ Common errors:
 
 1. **Key Management:** For `localstore` and `settings`, use consistent key naming (e.g., `app:window:width`).
 2. **Thread Safety:** `BrowserDB` is thread-safe. Wrap it in `Arc<BrowserDB>` to share across threads.
-3. **SQL Primary Keys:** Always define a `PRIMARY_KEY` when creating SQL tables.
 
 ---
 

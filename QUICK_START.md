@@ -81,41 +81,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 cargo run --example basic_usage
 ```
 
-## 📊 Common Operations
-
-### Using the SQL Subsystem
-
-BrowserDB now supports a modular SQL layer for structured queries.
-
-```rust
-use browserdb::BrowserDB;
-use std::sync::Arc;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = BrowserDB::open("sql_demo.bdb")?;
-    let sql = Arc::new(db).sql();
-
-    // Create Table
-    sql.execute("CREATE TABLE users (id INT PRIMARY_KEY, name TEXT)")?;
-
-    // Insert Data
-    sql.execute("INSERT INTO users VALUES (1, 'Alice')")?;
-
-    // Query Data
-    let result = sql.execute("SELECT * FROM users WHERE id = 1")?;
-    println!("Query Result: {}", result);
-
-    Ok(())
-}
-```
-
 ## ⚡ Performance Tips
 
 ### 1. Use Raw Core for Speed
-If you need maximum throughput (logs, cache, history), use the raw Rust API (`db.history().insert(...)`). It bypasses SQL parsing overhead.
-
-### 2. Use SQL for Flexibility
-If you need structured schemas and ease of use, use the SQL subsystem. It is still very fast (~250k ops/sec) but slower than raw core.
+If you need maximum throughput (logs, cache, history), use the raw Rust API (`db.history().insert(...)`).
 
 ## 🚨 Troubleshooting
 

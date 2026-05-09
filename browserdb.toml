@@ -20,8 +20,8 @@ rust_features = ["performance", "verbose_logging"]
 
 [performance]
 # 性能目标
-write_ops_per_sec = 10000
-read_ops_per_sec = 100000
+write_ops_per_sec = 100000
+read_ops_per_sec = 700000
 memory_limit_mb = 50
 disk_footprint_mb = 500
 query_latency_ms = 1.0
@@ -39,6 +39,7 @@ performance_testing = true
 verbose_logging = false
 encryption = false
 compression = true
+native_relational_kv = true
 
 [paths]
 # 路径配置

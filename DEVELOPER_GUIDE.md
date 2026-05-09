@@ -6,11 +6,10 @@ Architecture, implementation details, and guidelines for contributors.
 
 1. [Architecture Overview](#architecture-overview)
 2. [Core Components](#core-components)
-3. [SQL Subsystem](#sql-subsystem)
-4. [Development Setup](#development-setup)
-5. [Contribution Guidelines](#contribution-guidelines)
-6. [Performance Engineering](#performance-engineering)
-7. [Testing Strategy](#testing-strategy)
+3. [Development Setup](#development-setup)
+4. [Contribution Guidelines](#contribution-guidelines)
+5. [Performance Engineering](#performance-engineering)
+6. [Testing Strategy](#testing-strategy)
 
 ---
 
@@ -24,7 +23,7 @@ BrowserDB follows these core principles:
 2. **Memory Efficient**: <50MB footprint with intelligent caching
 3. **Reliability**: ACID compliance with corruption recovery
 4. **Simplicity**: Clear Pure Rust interfaces
-5. **Extensibility**: Modular SQL Subsystem
+5. **Simplicity**: No complex SQL parser overhead
 
 ### High-Level Architecture
 
@@ -41,10 +40,10 @@ BrowserDB follows these core principles:
 │  │ Coordinator  │  │   Cache      │  │  Operations  │          │
 │  └──────────────┘  └──────────────┘  └──────────────┘          │
 │         │                    │                    │           │
-│  ┌──────┴──────────────┐     │     ┌──────────────┴──────┐    │
-│  │     LSM-Tree        │     │     │    SQL Subsystem   │    │
-│  │     Storage         │     │     │    (Optional)      │    │
-│  └─────────────────────┘     │     └─────────────────────┘    │
+│  ┌──────┴──────────────┐     │                    │           │
+│  │     LSM-Tree        │     │                    │           │
+│  │     Storage         │     │                    │           │
+│  └─────────────────────┘     │                    │           │
 │                              │                                │
 │  ┌───────────────────────────┼────────────────────────────────┤
 │  │                    File System                             │
@@ -64,9 +63,6 @@ App → BrowserDB → LSM-Tree → MemTable (BTreeMap) → (Flush) → SSTable
 
 Read Operation:  
 App → BrowserDB → HeatMap Cache → (Miss) → LSM-Tree → SSTables
-
-SQL Operation:
-App → SQL Engine → Parse → Key-Value Mapping → BrowserDB → LSM-Tree
 ```
 
 ---
@@ -81,9 +77,6 @@ App → SQL Engine → Parse → Key-Value Mapping → BrowserDB → LSM-Tree
 - Database lifecycle management
 - Table accessors (History, Cookies, etc.)
 - Mode switching
-- SQL Engine instantiation
-
-### 2. LSM-Tree Storage (`lsm_tree.rs`)
 
 **Purpose**: High-performance storage with optimal write/read balance
 
@@ -111,26 +104,6 @@ App → SQL Engine → Parse → Key-Value Mapping → BrowserDB → LSM-Tree
 - **Entries**: Type, Key Len (Varint), Key, Value Len (Varint), Value, Timestamp, CRC32.
 - **Footer**: Summary stats and file checksum.
 
----
-
-## 🧩 SQL Subsystem
-
-**Purpose**: Modular SQL engine built on top of the KV core.
-
-**Design**:
-- **Schema Storage**: Table definitions are stored as special keys `sql:schema:<table_name>`.
-- **Row Storage**: Rows are serialized (using Bincode) and stored at `sql:data:<table_name>:<pk>`.
-- **Parsing**: Basic parser for `CREATE`, `INSERT`, and `SELECT`.
-
-**Example Flow**:
-1. User: `INSERT INTO users VALUES (1, 'Alice')`
-2. SQL Engine: 
-   - Parses query.
-   - Fetches schema for `users`.
-   - Serializes row `{id: 1, name: 'Alice'}`.
-   - Calls `db.put("sql:data:users:1", serialized_data)`.
-
----
 
 ## 🛠️ Development Setup
 
@@ -207,12 +180,6 @@ Run unit tests for individual modules:
 cargo test
 ```
 
-### Integration Testing
-
-Run the SQL demo or stress test examples to verify end-to-end functionality:
-```bash
-cargo run --example sql_demo
-```
 
 ---
 

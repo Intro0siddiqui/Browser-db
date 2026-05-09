@@ -16,7 +16,6 @@ tokio = { version = "1.0", features = ["full"] }
 
 # 序列化/反序列化
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 
 # 并发支持
 parking_lot = "0.12"
