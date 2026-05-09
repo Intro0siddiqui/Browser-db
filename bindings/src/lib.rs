@@ -1,5 +1,4 @@
 pub mod core;
-pub mod sql;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -103,10 +102,6 @@ impl BrowserDB {
     pub fn cache(&self) -> CacheTable<'_> { CacheTable { db: self } }
     pub fn localstore(&self) -> LocalStoreTable<'_> { LocalStoreTable { db: self } }
     pub fn settings(&self) -> SettingsTable<'_> { SettingsTable { db: self } }
-    
-    pub fn sql(self: Arc<Self>) -> sql::SqlEngine {
-        sql::SqlEngine::new(self)
-    }
 
     pub fn set_mode(&self, mode: DatabaseMode) -> Result<(), Box<dyn std::error::Error>> {
         let path = self.switcher.base_path.clone();
@@ -114,21 +109,6 @@ impl BrowserDB {
         Ok(())
     }
 
-    pub(crate) fn put_raw_localstore(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
-        match &*self.switcher.current_mode.read() {
-            CurrentMode::Persistent(pm) => pm.localstore.put(key, value)?,
-            CurrentMode::Ultra(um) => um.localstore.put(key, value),
-        }
-        Ok(())
-    }
-
-    pub(crate) fn get_raw_localstore(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
-        let value_opt = match &*self.switcher.current_mode.read() {
-            CurrentMode::Persistent(pm) => pm.localstore.get(key).map(|e| e.value),
-            CurrentMode::Ultra(um) => um.localstore.get(key),
-        };
-        Ok(value_opt)
-    }
 
     pub fn stats(&self) -> Result<DatabaseStats, Box<dyn std::error::Error>> {
         let history = self.history().count()? as u64;
@@ -325,11 +305,32 @@ impl<'a> LocalStoreTable<'a> {
     }
 
     pub fn insert(&self, entry: &LocalStoreEntry) -> Result<(), Box<dyn std::error::Error>> {
-        let key = bincode::serialize(&(entry.origin_hash, &entry.key))?;
+        self.insert_with_index(entry, &[])
+    }
+
+    pub fn insert_with_index(&self, entry: &LocalStoreEntry, index_fields: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+        let primary_key = bincode::serialize(&(entry.origin_hash, &entry.key))?;
         let value = bincode::serialize(entry)?;
+
         match &*self.db.switcher.current_mode.read() {
-            CurrentMode::Persistent(pm) => pm.localstore.put(key, value)?,
-            CurrentMode::Ultra(um) => um.localstore.put(key, value),
+            CurrentMode::Persistent(pm) => {
+                pm.localstore.put(primary_key.clone(), value)?;
+                for field in index_fields {
+                    if *field == "value" {
+                        let idx_key = format!("idx:localstore:value:{}:{}", entry.value, entry.key);
+                        pm.localstore.put(idx_key.into_bytes(), primary_key.clone())?;
+                    }
+                }
+            },
+            CurrentMode::Ultra(um) => {
+                um.localstore.put(primary_key.clone(), value);
+                for field in index_fields {
+                    if *field == "value" {
+                        let idx_key = format!("idx:localstore:value:{}:{}", entry.value, entry.key);
+                        um.localstore.put(idx_key.into_bytes(), primary_key.clone());
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -342,7 +343,6 @@ impl<'a> LocalStoreTable<'a> {
                 pm.localstore.scan_prefix(&prefix).into_iter().map(|e| e.value).collect()
             },
             CurrentMode::Ultra(um) => {
-                // For Ultra mode (HashMap), we still need to filter all entries unless we change the storage
                 um.localstore.all_entries().into_iter()
                     .filter(|(k, _)| k.starts_with(&prefix))
                     .map(|(_, v)| v)
@@ -355,6 +355,115 @@ impl<'a> LocalStoreTable<'a> {
             let entry: LocalStoreEntry = bincode::deserialize(&value)?;
             results.push(entry);
         }
+        Ok(results)
+    }
+
+    pub fn query(&self) -> QueryBuilder<'_, 'a> {
+        QueryBuilder::new(self)
+    }
+}
+
+pub struct QueryBuilder<'q, 'a> {
+    table: &'q LocalStoreTable<'a>,
+    prefix: Vec<u8>,
+    filters: Vec<Box<dyn Fn(&LocalStoreEntry) -> bool + 'a>>,
+    limit: Option<usize>,
+    value_eq: Option<String>,
+}
+
+impl<'q, 'a> QueryBuilder<'q, 'a> {
+    pub fn new(table: &'q LocalStoreTable<'a>) -> Self {
+        Self {
+            table,
+            prefix: Vec::new(),
+            filters: Vec::new(),
+            limit: None,
+            value_eq: None,
+        }
+    }
+
+    pub fn prefix(mut self, prefix: Vec<u8>) -> Self {
+        self.prefix = prefix;
+        self
+    }
+
+    pub fn filter<F>(mut self, filter: F) -> Self
+    where F: Fn(&LocalStoreEntry) -> bool + 'a {
+        self.filters.push(Box::new(filter));
+        self
+    }
+
+    pub fn value_eq(mut self, value: String) -> Self {
+        self.value_eq = Some(value);
+        self
+    }
+
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn execute(self) -> Result<Vec<LocalStoreEntry>, Box<dyn std::error::Error>> {
+        let current_mode = self.table.db.switcher.current_mode.read();
+
+        let mut results = Vec::new();
+
+        match &*current_mode {
+            CurrentMode::Persistent(pm) => {
+                // Optimized path if we have value_eq and indices
+                if let Some(val) = &self.value_eq {
+                    let idx_prefix = format!("idx:localstore:value:{}:", val).into_bytes();
+                    let idx_entries = pm.localstore.scan_prefix(&idx_prefix);
+                    for idx_kv in idx_entries {
+                        if let Some(primary_kv) = pm.localstore.get(&idx_kv.value) {
+                            if let Ok(entry) = bincode::deserialize::<LocalStoreEntry>(&primary_kv.value) {
+                                if self.filters.iter().all(|f| f(&entry)) {
+                                    results.push(entry);
+                                }
+                            }
+                        }
+                        if let Some(l) = self.limit {
+                            if results.len() >= l { break; }
+                        }
+                    }
+                } else {
+                    // Standard predicate-based scan
+                    let kvs = pm.localstore.scan_with_predicate(&self.prefix, |kv| {
+                        if let Ok(entry) = bincode::deserialize::<LocalStoreEntry>(&kv.value) {
+                            self.filters.iter().all(|f| f(&entry))
+                        } else {
+                            false
+                        }
+                    });
+                    for kv in kvs {
+                        if let Ok(entry) = bincode::deserialize::<LocalStoreEntry>(&kv.value) {
+                            results.push(entry);
+                        }
+                        if let Some(l) = self.limit {
+                            if results.len() >= l { break; }
+                        }
+                    }
+                }
+            },
+            CurrentMode::Ultra(um) => {
+                let all = um.localstore.all_entries();
+                for (k, v) in all {
+                    if !k.starts_with(&self.prefix) { continue; }
+                    if let Ok(entry) = bincode::deserialize::<LocalStoreEntry>(&v) {
+                        if self.filters.iter().all(|f| f(&entry)) {
+                            if let Some(val) = &self.value_eq {
+                                if entry.value != *val { continue; }
+                            }
+                            results.push(entry);
+                        }
+                    }
+                    if let Some(l) = self.limit {
+                        if results.len() >= l { break; }
+                    }
+                }
+            }
+        };
+
         Ok(results)
     }
 }

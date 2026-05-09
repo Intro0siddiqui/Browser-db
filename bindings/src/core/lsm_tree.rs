@@ -169,26 +169,30 @@ impl SSTable {
         
         // Binary Search Index
         if let Ok(idx) = self.index.binary_search_by(|i| i.key.as_slice().cmp(key)) {
-            let index_entry = &self.index[idx];
-            let start = index_entry.position as usize;
-            let end = start + index_entry.size;
-            
-            if end > self.mmap.len() { return None; }
-            
-            let data = &self.mmap[start..end];
-            let mut cursor = io::Cursor::new(data);
-            
-            if let Ok(log_entry) = BDBLogEntry::read(&mut cursor) {
-                return Some(KVEntry {
-                    key: log_entry.key,
-                    value: log_entry.value,
-                    timestamp: log_entry.timestamp,
-                    entry_type: log_entry.entry_type,
-                    deleted: log_entry.entry_type == EntryType::Delete,
-                });
-            }
+            return self.get_at_index(&self.index[idx]);
         }
         
+        None
+    }
+
+    pub fn get_at_index(&self, index_entry: &IndexEntry) -> Option<KVEntry> {
+        let start = index_entry.position as usize;
+        let end = start + index_entry.size;
+
+        if end > self.mmap.len() { return None; }
+
+        let data = &self.mmap[start..end];
+        let mut cursor = io::Cursor::new(data);
+
+        if let Ok(log_entry) = BDBLogEntry::read(&mut cursor) {
+            return Some(KVEntry {
+                key: log_entry.key,
+                value: log_entry.value,
+                timestamp: log_entry.timestamp,
+                entry_type: log_entry.entry_type,
+                deleted: log_entry.entry_type == EntryType::Delete,
+            });
+        }
         None
     }
 
@@ -284,12 +288,6 @@ impl LSMTree {
             for (level, sst) in loaded_sstables {
                 levels[level as usize].write().push(sst);
             }
-            
-            // Sort each level by timestamp (newest first)? 
-            // For now, append order is likely file system order (random).
-            // Ideally we should sort. But for get(), we iterate rev().
-            // If we want "newest sstable first", we should sort by timestamp (descending).
-            // Filename has timestamp.
         }
         
         Self {
@@ -372,19 +370,30 @@ impl LSMTree {
     }
 
     pub fn scan_prefix(&self, prefix: &[u8]) -> Vec<KVEntry> {
-        let mut results: BTreeMap<Vec<u8>, KVEntry> = BTreeMap::new();
+        self.scan_with_predicate(prefix, |_| true)
+    }
+
+    pub fn scan_with_predicate<F>(&self, prefix: &[u8], predicate: F) -> Vec<KVEntry>
+    where F: Fn(&KVEntry) -> bool {
+        let mut results: BTreeMap<Vec<u8>, Option<KVEntry>> = BTreeMap::new();
 
         // 1. MemTable
-        let mem = self.memtable.read();
-        let range = if prefix.is_empty() {
-            mem.entries.range::<Vec<u8>, _>(..)
-        } else {
-            mem.entries.range(prefix.to_vec()..)
-        };
+        {
+            let mem = self.memtable.read();
+            let range = if prefix.is_empty() {
+                mem.entries.range::<Vec<u8>, _>(..)
+            } else {
+                mem.entries.range(prefix.to_vec()..)
+            };
 
-        for (key, entry) in range {
-            if !prefix.is_empty() && !key.starts_with(prefix) { break; }
-            results.insert(key.clone(), entry.clone());
+            for (key, entry) in range {
+                if !prefix.is_empty() && !key.starts_with(prefix) { break; }
+                if !entry.deleted && predicate(entry) {
+                    results.insert(key.clone(), Some(entry.clone()));
+                } else {
+                    results.insert(key.clone(), None);
+                }
+            }
         }
 
         // 2. Levels (newest SSTables first)
@@ -404,19 +413,11 @@ impl LSMTree {
                     if !prefix.is_empty() && !idx.key.starts_with(prefix) { break; }
                     if !results.contains_key(&idx.key) {
                         // Directly read from mmap
-                        let start = idx.position as usize;
-                        let end = start + idx.size;
-                        if end <= sstable.mmap.len() {
-                            let data = &sstable.mmap[start..end];
-                            let mut cursor = io::Cursor::new(data);
-                            if let Ok(log_entry) = BDBLogEntry::read(&mut cursor) {
-                                results.insert(idx.key.clone(), KVEntry {
-                                    key: log_entry.key,
-                                    value: log_entry.value,
-                                    timestamp: log_entry.timestamp,
-                                    entry_type: log_entry.entry_type,
-                                    deleted: log_entry.entry_type == EntryType::Delete,
-                                });
+                        if let Some(kv) = sstable.get_at_index(idx) {
+                            if !kv.deleted && predicate(&kv) {
+                                results.insert(idx.key.clone(), Some(kv));
+                            } else {
+                                results.insert(idx.key.clone(), None);
                             }
                         }
                     }
@@ -424,14 +425,14 @@ impl LSMTree {
             }
         }
 
-        results.into_values().filter(|e| !e.deleted).collect()
+        results.into_values().flatten().collect()
     }
     
     pub fn flush(&self) -> io::Result<()> {
         let mut mem = self.memtable.write();
         if mem.entries.is_empty() { return Ok(()); }
         
-        // Clone entries for flushing (BTreeMap matches SSTable creation signature now)
+        // Clone entries for flushing
         let entries = mem.entries.clone();
         mem.clear();
         drop(mem); // Unlock MemTable
@@ -441,9 +442,6 @@ impl LSMTree {
         
         // Add to Level 0
         self.levels[0].write().push(sstable);
-        
-        // Trigger compaction (Simplified: just check counts)
-        // self.compact();
         
         Ok(())
     }

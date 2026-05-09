@@ -44,6 +44,48 @@ async fn test_database_creation_and_basic_operations() {
 }
 
 #[tokio::test]
+async fn test_localstorage_query_builder() {
+    let temp_dir = tempdir().unwrap();
+    let db_path = temp_dir.path().join("localstore_query_test.bdb");
+
+    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+
+    let entry1 = LocalStoreEntry {
+        origin_hash: 0x1,
+        key: "k1".to_string(),
+        value: "v1_target".to_string(),
+    };
+    let entry2 = LocalStoreEntry {
+        origin_hash: 0x1,
+        key: "k2".to_string(),
+        value: "v2".to_string(),
+    };
+
+    db.localstore().insert(&entry1).expect("Failed to insert entry1");
+    db.localstore().insert(&entry2).expect("Failed to insert entry2");
+
+    // Test simple query
+    let results = db.localstore().query()
+        .filter(|e| e.value.contains("target"))
+        .execute()
+        .expect("Failed to execute query");
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].key, "k1");
+
+    // Test with index
+    db.localstore().insert_with_index(&entry1, &["value"]).expect("Failed to insert with index");
+
+    let index_results = db.localstore().query()
+        .filter(|e| e.value == "v1_target")
+        .execute()
+        .expect("Failed to execute query with index");
+
+    assert_eq!(index_results.len(), 1);
+    assert_eq!(index_results[0].key, "k1");
+}
+
+#[tokio::test]
 async fn test_cookie_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("cookie_test.bdb");
