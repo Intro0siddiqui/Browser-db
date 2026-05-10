@@ -27,12 +27,15 @@ pub struct HeatEntry {
     pub created_at: u64,
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use parking_lot::RwLock;
+
 pub struct HeatTracker {
     max_entries: usize,
     decay_factor: f64,
     hot_threshold: u32,
-    last_decay_time: u64,
-    heat_entries: HashMap<Vec<u8>, HeatEntry>,
+    last_decay_time: AtomicU64,
+    heat_entries: RwLock<HashMap<Vec<u8>, HeatEntry>>,
 }
 
 impl HeatTracker {
@@ -42,17 +45,18 @@ impl HeatTracker {
             max_entries,
             decay_factor: 0.95,
             hot_threshold: 10,
-            last_decay_time: now,
-            heat_entries: HashMap::new(),
+            last_decay_time: AtomicU64::new(now),
+            heat_entries: RwLock::new(HashMap::new()),
         }
     }
 
-    pub fn record_access(&mut self, key: &[u8], query_type: QueryType) {
+    pub fn record_access(&self, key: &[u8], query_type: QueryType) {
         self.apply_decay();
         
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         
-        let entry = self.heat_entries.entry(key.to_vec()).or_insert(HeatEntry {
+        let mut entries = self.heat_entries.write();
+        let entry = entries.entry(key.to_vec()).or_insert(HeatEntry {
             heat: 0,
             access_count: 0,
             last_access: now,
@@ -72,7 +76,8 @@ impl HeatTracker {
     }
     
     pub fn get_heat(&self, key: &[u8]) -> u32 {
-        if let Some(entry) = self.heat_entries.get(key) {
+        let entries = self.heat_entries.read();
+        if let Some(entry) = entries.get(key) {
              // Simple decay simulation for read
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
             let age_seconds = now.saturating_sub(entry.last_access);
@@ -87,24 +92,30 @@ impl HeatTracker {
         0
     }
     
-    fn apply_decay(&mut self) {
+    fn apply_decay(&self) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        if now - self.last_decay_time < 60 {
+        let last_decay = self.last_decay_time.load(Ordering::Relaxed);
+
+        if now - last_decay < 60 {
             return;
         }
-        self.last_decay_time = now;
+
+        if self.last_decay_time.compare_exchange(last_decay, now, Ordering::SeqCst, Ordering::Relaxed).is_err() {
+            return;
+        }
         
+        let mut entries = self.heat_entries.write();
         // Apply decay to all and remove cold
         let mut keys_to_remove = Vec::new();
         
-        for (key, entry) in self.heat_entries.iter_mut() {
+        for (key, entry) in entries.iter_mut() {
             if entry.heat < 1 {
                 keys_to_remove.push(key.clone());
             }
         }
         
         for key in keys_to_remove {
-            self.heat_entries.remove(&key);
+            entries.remove(&key);
         }
     }
 }
