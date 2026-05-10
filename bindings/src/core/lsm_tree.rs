@@ -614,7 +614,6 @@ impl LSMTreeInner {
             }
 
             if let Some(key) = min_key {
-                let key = key.clone();
                 let mut best_entry: Option<KVEntry> = None;
                 let mut best_index: usize = 0;
 
