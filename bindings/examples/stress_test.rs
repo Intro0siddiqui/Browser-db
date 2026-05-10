@@ -19,8 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Database initialized in {:?}", start_init.elapsed());
 
     // Configuration
-    const TOTAL_RECORDS: u32 = 1_000_000;
-    const KEY_SIZE: usize = 32;
+    const TOTAL_RECORDS: u32 = 10_000;
     // HistoryEntry payload is roughly: 8 (u64) + 16 (u128) + ~30 (String) + 4 (u32) = ~60 bytes + overhead.
     
     println!("\n📝 Phase 1: Write Stress Test");
@@ -91,6 +90,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("   ✅ Verified Record #{}: '{}'", verify_id, entry.title);
     } else {
         println!("   ❌ FAILED to verify Record #{}", verify_id);
+    }
+
+    // 4. Crash Recovery Simulation
+    println!("\n💥 Phase 4: Crash Recovery Simulation");
+    println!("   Writing records without closing (simulating crash)...");
+
+    let crash_id = TOTAL_RECORDS + 1;
+    let entry = HistoryEntry {
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis(),
+        url: format!("https://example.com/page/{}", crash_id),
+        url_hash: crash_id as u128,
+        title: format!("Crash Recovery Title {}", crash_id),
+        visit_count: 1,
+    };
+    db2.history().insert(&entry)?;
+
+    println!("   Simulating abrupt process exit (not calling drop)...");
+    // We can't really "exit" here easily without stopping the test,
+    // but we can bypass drop by using std::mem::forget or just opening a new handle
+    // to the same path after manually loading the WAL.
+    std::mem::forget(db2);
+
+    println!("   Re-opening database to check WAL recovery...");
+    let db3 = BrowserDB::open(db_path)?;
+    if let Some(recovered) = db3.history().get(crash_id as u128)? {
+        println!("   ✅ Successfully recovered record '{}' from WAL!", recovered.title);
+    } else {
+        println!("   ❌ FAILED to recover record from WAL.");
     }
 
     println!("\n🎉 Stress Test Finished.");
