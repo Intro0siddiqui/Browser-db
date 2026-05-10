@@ -92,7 +92,7 @@ impl BrowserDB {
             max_level0_files: 4,
         };
         
-        let switcher = ModeSwitcher::new(path, DatabaseMode::Persistent, config);
+        let switcher = ModeSwitcher::new(path, DatabaseMode::Persistent, config)?;
         Ok(Self {
             switcher: Arc::new(switcher),
         })

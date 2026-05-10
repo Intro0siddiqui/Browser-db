@@ -91,13 +91,13 @@ impl PersistentMode {
         !self.settings.inner.memtable.read().entries.is_empty()
     }
 
-    pub fn new(path: &Path, config: &ModeConfig) -> Self {
+    pub fn new(path: &Path, config: &ModeConfig) -> Result<Self, std::io::Error> {
         let max_mem = config.max_memory / 5; // Divide memory among tables
-        let history = LSMTree::new(path, TableType::History, max_mem);
-        let cookies = LSMTree::new(path, TableType::Cookies, max_mem);
-        let cache = LSMTree::new(path, TableType::Cache, max_mem);
-        let localstore = LSMTree::new(path, TableType::LocalStore, max_mem);
-        let settings = LSMTree::new(path, TableType::Settings, max_mem);
+        let history = LSMTree::new(path, TableType::History, max_mem)?;
+        let cookies = LSMTree::new(path, TableType::Cookies, max_mem)?;
+        let cache = LSMTree::new(path, TableType::Cache, max_mem)?;
+        let localstore = LSMTree::new(path, TableType::LocalStore, max_mem)?;
+        let settings = LSMTree::new(path, TableType::Settings, max_mem)?;
 
         // Apply config
         history.set_max_level0_files(config.max_level0_files);
@@ -106,14 +106,14 @@ impl PersistentMode {
         localstore.set_max_level0_files(config.max_level0_files);
         settings.set_max_level0_files(config.max_level0_files);
 
-        Self {
+        Ok(Self {
             path: path.to_path_buf(),
             history,
             cookies,
             cache,
             localstore,
             settings,
-        }
+        })
     }
 }
 
@@ -149,24 +149,24 @@ pub struct ModeSwitcher {
 }
 
 impl ModeSwitcher {
-    pub fn new(path: &Path, mode: DatabaseMode, config: ModeConfig) -> Self {
+    pub fn new(path: &Path, mode: DatabaseMode, config: ModeConfig) -> Result<Self, std::io::Error> {
         let current = match mode {
-            DatabaseMode::Persistent => CurrentMode::Persistent(PersistentMode::new(path, &config)),
+            DatabaseMode::Persistent => CurrentMode::Persistent(PersistentMode::new(path, &config)?),
             DatabaseMode::Ultra => CurrentMode::Ultra(UltraMode::new()),
         };
         
-        Self {
+        Ok(Self {
             current_mode: Arc::new(RwLock::new(current)),
             config,
             base_path: path.to_path_buf(),
-        }
+        })
     }
     
     pub fn switch_mode(&self, new_mode: DatabaseMode, path: &Path) -> Result<(), ModeSwitchError> {
         let mut current = self.current_mode.write();
         
         let new_instance = match new_mode {
-            DatabaseMode::Persistent => CurrentMode::Persistent(PersistentMode::new(path, &self.config)),
+            DatabaseMode::Persistent => CurrentMode::Persistent(PersistentMode::new(path, &self.config).map_err(ModeSwitchError::IoError)?),
             DatabaseMode::Ultra => CurrentMode::Ultra(UltraMode::new()),
         };
 
