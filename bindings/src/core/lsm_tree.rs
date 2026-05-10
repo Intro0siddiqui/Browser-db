@@ -95,6 +95,24 @@ pub struct SSTable {
     pub bloom_filter: Option<BloomFilter>,
 }
 
+pub struct SSTableIterator<'a> {
+    sstable: &'a SSTable,
+    current_index: usize,
+}
+
+impl<'a> Iterator for SSTableIterator<'a> {
+    type Item = KVEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_index < self.sstable.index.len() {
+            let entry = self.sstable.get_at_index(&self.sstable.index[self.current_index]);
+            self.current_index += 1;
+            return entry;
+        }
+        None
+    }
+}
+
 impl SSTable {
     pub fn create(level: u8, entries: &BTreeMap<Vec<u8>, KVEntry>, base_path: &Path, table_type: TableType) -> io::Result<Self> {
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
@@ -195,6 +213,13 @@ impl SSTable {
             });
         }
         None
+    }
+
+    pub fn iter(&self) -> SSTableIterator<'_> {
+        SSTableIterator {
+            sstable: self,
+            current_index: 0,
+        }
     }
 
     pub fn open(file_path: PathBuf, level: u8) -> io::Result<Self> {

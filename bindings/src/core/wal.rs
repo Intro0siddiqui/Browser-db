@@ -46,3 +46,36 @@ impl WALManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use crate::core::format::EntryType;
+    use std::io::Write;
+    use std::fs::OpenOptions;
+
+    #[test]
+    fn test_wal_recovery_graceful_eof() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("test.wal");
+
+        {
+            let mut wal = WALManager::new(&wal_path).unwrap();
+            let mut entry = BDBLogEntry::new(EntryType::Insert, b"key1".to_vec(), b"value1".to_vec());
+            wal.log(&mut entry).unwrap();
+        }
+
+        // Append some garbage to simulate partial write / unexpected EOF
+        {
+            let mut file = OpenOptions::new().append(true).open(&wal_path).unwrap();
+            file.write_all(b"partial data").unwrap();
+        }
+
+        let wal = WALManager::new(&wal_path).unwrap();
+        let entries = wal.read_all().unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, b"key1");
+    }
+}
