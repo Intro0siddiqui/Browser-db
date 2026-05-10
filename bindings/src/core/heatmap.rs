@@ -178,3 +178,42 @@ impl BloomFilter {
         h
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_heat_tracker_basic() {
+        let mut tracker = HeatTracker::new(100);
+        let key = b"test_key";
+
+        tracker.record_access(key, QueryType::Read);
+        assert!(tracker.get_heat(key) >= 1);
+
+        tracker.record_access(key, QueryType::Write);
+        assert!(tracker.get_heat(key) >= 3);
+    }
+
+    #[test]
+    fn test_decay_factor_math() {
+        let tracker = HeatTracker::new(100);
+        let initial_heat = 100.0;
+        let decay_factor = tracker.decay_factor;
+        let cycles = 5.0;
+
+        let decayed_heat = initial_heat * decay_factor.powf(cycles);
+        assert!(decayed_heat < initial_heat);
+        assert!((decayed_heat - 77.37).abs() < 1.0); // 100 * 0.95^5 approx 77.37
+    }
+
+    #[test]
+    fn test_bloom_filter_basic() {
+        let mut bf = BloomFilter::new(100, 0.01);
+        let key = b"test_key";
+
+        assert!(!bf.might_contain(key));
+        bf.add(key);
+        assert!(bf.might_contain(key));
+    }
+}
