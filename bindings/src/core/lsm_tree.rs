@@ -2,13 +2,15 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::BTreeMap;
 use parking_lot::RwLock;
 use memmap2::Mmap;
 
 use crate::core::format::{BDBLogEntry, EntryType, TableType};
-use crate::core::heatmap::BloomFilter;
+use crate::core::heatmap::{BloomFilter, HeatTracker, QueryType};
+use crate::core::wal::WALManager;
 
 #[derive(Debug, Clone)]
 pub struct KVEntry {
@@ -237,11 +239,20 @@ impl SSTable {
     }
 }
 
+#[derive(Clone)]
 pub struct LSMTree {
+    pub inner: Arc<LSMTreeInner>,
+}
+
+pub struct LSMTreeInner {
     pub memtable: RwLock<MemTable>,
     pub levels: Vec<RwLock<Vec<Arc<SSTable>>>>, // 10 levels
     pub base_path: PathBuf,
     pub table_type: TableType,
+    pub wal: RwLock<WALManager>,
+    pub heat_tracker: RwLock<HeatTracker>,
+    pub max_level0_files: AtomicUsize,
+    pub compaction_in_flight: AtomicBool,
 }
 
 impl LSMTree {
@@ -249,6 +260,24 @@ impl LSMTree {
         let mut levels = Vec::with_capacity(10);
         for _ in 0..10 {
             levels.push(RwLock::new(Vec::new()));
+        }
+
+        let wal_path = base_path.join(format!("{}.wal", match table_type {
+            TableType::History => "history",
+            TableType::Cookies => "cookies",
+            TableType::Cache => "cache",
+            TableType::LocalStore => "localstore",
+            TableType::Settings => "settings",
+        }));
+        let wal = WALManager::new(&wal_path).expect("Failed to initialize WAL");
+
+        let mut memtable = MemTable::new(max_memtable_size, table_type);
+
+        // Recover from WAL
+        if let Ok(entries) = wal.read_all() {
+            for entry in entries {
+                memtable.put(entry.key, entry.value, entry.entry_type);
+            }
         }
 
         // Recover existing SSTables
@@ -261,7 +290,7 @@ impl LSMTree {
                 TableType::Settings => "settings",
             };
             
-            let mut loaded_sstables: Vec<(u8, Arc<SSTable>)> = Vec::new();
+            let mut loaded_sstables: Vec<(u8, u128, Arc<SSTable>)> = Vec::new();
 
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -270,11 +299,11 @@ impl LSMTree {
                         if fname.starts_with(prefix) {
                             // Parse level from filename: prefix_level_timestamp_count.sst
                             let parts: Vec<&str> = fname.split('_').collect();
-                            if parts.len() >= 2 {
-                                if let Ok(level) = parts[1].parse::<u8>() {
+                            if parts.len() >= 3 {
+                                if let (Ok(level), Ok(timestamp)) = (parts[1].parse::<u8>(), parts[2].parse::<u128>()) {
                                     if level < 10 {
                                         if let Ok(sst) = SSTable::open(path, level) {
-                                            loaded_sstables.push((level, Arc::new(sst)));
+                                            loaded_sstables.push((level, timestamp, Arc::new(sst)));
                                         }
                                     }
                                 }
@@ -284,38 +313,57 @@ impl LSMTree {
                 }
             }
             
+            // Sort by timestamp to preserve order (newer SSTables at the end)
+            loaded_sstables.sort_by_key(|&(_, timestamp, _)| timestamp);
+
             // Add to levels
-            for (level, sst) in loaded_sstables {
+            for (level, _, sst) in loaded_sstables {
                 levels[level as usize].write().push(sst);
             }
         }
         
         Self {
-            memtable: RwLock::new(MemTable::new(max_memtable_size, table_type)),
-            levels,
-            base_path: base_path.to_path_buf(),
-            table_type,
+            inner: Arc::new(LSMTreeInner {
+                memtable: RwLock::new(memtable),
+                levels,
+                base_path: base_path.to_path_buf(),
+                table_type,
+                wal: RwLock::new(wal),
+                heat_tracker: RwLock::new(HeatTracker::new(10000)),
+                max_level0_files: AtomicUsize::new(4), // Default, can be updated from config
+                compaction_in_flight: AtomicBool::new(false),
+            })
         }
+    }
+
+    pub fn set_max_level0_files(&self, count: usize) {
+        self.inner.max_level0_files.store(count, Ordering::SeqCst);
     }
     
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> io::Result<()> {
-        let mut mem = self.memtable.write();
+        let mut wal = self.inner.wal.write();
+        let mut wal_entry = BDBLogEntry::new(EntryType::Insert, key.clone(), value.clone());
+        wal.log(&mut wal_entry)?;
+
+        let mut mem = self.inner.memtable.write();
         mem.put(key, value, EntryType::Insert);
         
-        if mem.should_flush() {
-            drop(mem); // unlock
+        let needs_flush = mem.should_flush();
+        drop(mem);
+        drop(wal);
+
+        if needs_flush {
             self.flush()?;
         }
         Ok(())
     }
 
     pub fn clear(&self) -> io::Result<()> {
-        let mut mem = self.memtable.write();
+        let mut mem = self.inner.memtable.write();
         mem.clear();
-        drop(mem);
 
         let mut levels = Vec::new();
-        for l in &self.levels {
+        for l in &self.inner.levels {
             levels.push(l.write());
         }
 
@@ -325,12 +373,17 @@ impl LSMTree {
             }
         }
 
+        // Wipe WAL
+        self.inner.wal.write().truncate()?;
+
         Ok(())
     }
     
     pub fn get(&self, key: &[u8]) -> Option<KVEntry> {
+        self.inner.heat_tracker.write().record_access(key, QueryType::Read);
+
         // 1. MemTable
-        if let Some(entry) = self.memtable.read().get(key) {
+        if let Some(entry) = self.inner.memtable.read().get(key) {
             if entry.deleted {
                 return None;
             }
@@ -338,7 +391,7 @@ impl LSMTree {
         }
         
         // 2. Levels (0 to 9)
-        for level in &self.levels {
+        for level in &self.inner.levels {
             let sstables = level.read();
             // Search newest SSTables first (usually end of list)
             for sstable in sstables.iter().rev() {
@@ -355,11 +408,18 @@ impl LSMTree {
     }
 
     pub fn delete(&self, key: Vec<u8>) -> io::Result<()> {
-        let mut mem = self.memtable.write();
+        let mut wal = self.inner.wal.write();
+        let mut wal_entry = BDBLogEntry::new(EntryType::Delete, key.clone(), Vec::new());
+        wal.log(&mut wal_entry)?;
+
+        let mut mem = self.inner.memtable.write();
         mem.put(key, Vec::new(), EntryType::Delete);
 
-        if mem.should_flush() {
-            drop(mem);
+        let needs_flush = mem.should_flush();
+        drop(mem);
+        drop(wal);
+
+        if needs_flush {
             self.flush()?;
         }
         Ok(())
@@ -379,7 +439,7 @@ impl LSMTree {
 
         // 1. MemTable
         {
-            let mem = self.memtable.read();
+            let mem = self.inner.memtable.read();
             let range = if prefix.is_empty() {
                 mem.entries.range::<Vec<u8>, _>(..)
             } else {
@@ -397,7 +457,7 @@ impl LSMTree {
         }
 
         // 2. Levels (newest SSTables first)
-        for level in &self.levels {
+        for level in &self.inner.levels {
             let sstables = level.read();
             for sstable in sstables.iter().rev() {
                 let start_idx = if prefix.is_empty() {
@@ -429,21 +489,205 @@ impl LSMTree {
     }
     
     pub fn flush(&self) -> io::Result<()> {
-        let mut mem = self.memtable.write();
+        let mut wal = self.inner.wal.write();
+        let mut mem = self.inner.memtable.write();
         if mem.entries.is_empty() { return Ok(()); }
         
         // Clone entries for flushing
         let entries = mem.entries.clone();
+
+        // Create SSTable (Level 0) - Do NOT clear memtable yet
+        let sstable = match SSTable::create(0, &entries, &self.inner.base_path, self.inner.table_type) {
+            Ok(s) => Arc::new(s),
+            Err(e) => return Err(e),
+        };
+
+        // Success! Now clear memtable and WAL
         mem.clear();
-        drop(mem); // Unlock MemTable
+        wal.truncate()?;
         
-        // Create SSTable (Level 0)
-        let sstable = Arc::new(SSTable::create(0, &entries, &self.base_path, self.table_type)?);
+        drop(mem); // Unlock MemTable
+        drop(wal); // Unlock WAL
         
         // Add to Level 0
-        self.levels[0].write().push(sstable);
-        
+        {
+            let mut l0 = self.inner.levels[0].write();
+            l0.push(sstable);
+
+            // Check for compaction
+            if l0.len() >= self.inner.max_level0_files.load(Ordering::SeqCst) && !self.inner.compaction_in_flight.swap(true, Ordering::SeqCst) {
+                // Prioritize compaction using HeatTracker data
+                let mut tables_to_compact = l0.clone();
+
+                // Use HeatTracker to influence compaction priority
+                {
+                    let heat = self.inner.heat_tracker.read();
+                    tables_to_compact.sort_by_cached_key(|t| {
+                        let mut total_heat = 0u64;
+                        for idx in &t.index {
+                            total_heat += heat.get_heat(&idx.key) as u64;
+                        }
+                        total_heat / t.index.len().max(1) as u64
+                    });
+                }
+                drop(l0);
+
+                let inner = Arc::clone(&self.inner);
+                std::thread::spawn(move || {
+                    // Record compaction access in heat tracker
+                    for table in &tables_to_compact {
+                        let mut ht = inner.heat_tracker.write();
+                        for idx in &table.index {
+                            ht.record_access(&idx.key, QueryType::Compact);
+                        }
+                    }
+
+                    if let Ok(new_sst) = inner.merge_sstables(1, tables_to_compact.clone()) {
+                        let mut l0 = inner.levels[0].write();
+                        let mut l1 = inner.levels[1].write();
+
+                        l0.retain(|t| !tables_to_compact.iter().any(|tc| tc.file_path == t.file_path));
+                        l1.push(new_sst);
+
+                        // Delete old sstables AFTER the atomic swap
+                        for table in tables_to_compact {
+                            let _ = fs::remove_file(&table.file_path);
+                        }
+                    }
+                    inner.compaction_in_flight.store(false, Ordering::SeqCst);
+                });
+            }
+        }
+
         Ok(())
+    }
+
+    pub fn merge_sstables(&self, level: u8, tables: Vec<Arc<SSTable>>) -> io::Result<Arc<SSTable>> {
+        self.inner.merge_sstables(level, tables)
+    }
+}
+
+impl LSMTreeInner {
+    pub fn merge_sstables(&self, level: u8, tables: Vec<Arc<SSTable>>) -> io::Result<Arc<SSTable>> {
+        let is_final_level = level == 9;
+
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+        let filename = format!("{}_{}_{}_merged.sst",
+            match self.table_type {
+                TableType::History => "history",
+                TableType::Cookies => "cookies",
+                TableType::Cache => "cache",
+                TableType::LocalStore => "localstore",
+                TableType::Settings => "settings",
+            },
+            level, timestamp);
+        let file_path = self.base_path.join(filename);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&file_path)?;
+
+        let mut index = Vec::new();
+        let mut offset = 0u64;
+
+        // Multi-way merge sort
+        let mut iterators: Vec<_> = tables.iter().map(|t| t.index.iter().peekable()).collect();
+
+        loop {
+            let mut min_key: Option<&Vec<u8>> = None;
+
+            for iter in iterators.iter_mut() {
+                if let Some(idx_entry) = iter.peek() {
+                    match min_key {
+                        None => {
+                            min_key = Some(&idx_entry.key);
+                        }
+                        Some(key) => {
+                            if idx_entry.key < *key {
+                                min_key = Some(&idx_entry.key);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(key) = min_key {
+                let key = key.clone();
+                let mut best_entry: Option<KVEntry> = None;
+                let mut best_index: usize = 0;
+
+                for (i, iter) in iterators.iter_mut().enumerate() {
+                    if let Some(peeked) = iter.peek() {
+                        if peeked.key == key {
+                            let entry = tables[i].get_at_index(peeked).unwrap();
+                            let is_better = match &best_entry {
+                                None => true,
+                                Some(best) => {
+                                    if entry.timestamp > best.timestamp {
+                                        true
+                                    } else if entry.timestamp == best.timestamp {
+                                        i > best_index
+                                    } else {
+                                        false
+                                    }
+                                }
+                            };
+                            if is_better {
+                                best_entry = Some(entry);
+                                best_index = i;
+                            }
+                            iter.next(); // Advance all iterators with this key
+                        }
+                    }
+                }
+
+                if let Some(entry) = best_entry {
+                    if !is_final_level || !entry.deleted {
+                        let mut bdb_entry = BDBLogEntry {
+                            entry_type: entry.entry_type,
+                            key: entry.key.clone(),
+                            value: entry.value.clone(),
+                            timestamp: entry.timestamp,
+                            entry_crc: 0,
+                        };
+
+                        let size = bdb_entry.write(&mut file)?;
+
+                        index.push(IndexEntry {
+                            key: entry.key.clone(),
+                            position: offset,
+                            size,
+                            timestamp: entry.timestamp,
+                        });
+
+                        offset += size as u64;
+                    }
+                }
+            } else {
+                break; // No more entries
+            }
+        }
+
+        file.sync_all()?;
+        let mmap = unsafe { Mmap::map(&file)? };
+
+        // Build Bloom Filter
+        let mut bloom = BloomFilter::new(index.len(), 0.01);
+        for idx in &index {
+            bloom.add(&idx.key);
+        }
+
+        let new_sstable = Arc::new(SSTable {
+            level,
+            file_path,
+            mmap,
+            index,
+            bloom_filter: Some(bloom),
+        });
+
+        Ok(new_sstable)
     }
 }
 

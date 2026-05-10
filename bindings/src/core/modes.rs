@@ -36,6 +36,7 @@ pub struct ModeConfig {
     pub max_memory: usize,
     pub enable_compression: bool,
     pub enable_heat_tracking: bool,
+    pub max_level0_files: usize,
 }
 
 pub struct UltraTable {
@@ -83,22 +84,35 @@ pub struct PersistentMode {
 
 impl PersistentMode {
     pub fn has_unsynced_data(&self) -> bool {
-        !self.history.memtable.read().entries.is_empty() ||
-        !self.cookies.memtable.read().entries.is_empty() ||
-        !self.cache.memtable.read().entries.is_empty() ||
-        !self.localstore.memtable.read().entries.is_empty() ||
-        !self.settings.memtable.read().entries.is_empty()
+        !self.history.inner.memtable.read().entries.is_empty() ||
+        !self.cookies.inner.memtable.read().entries.is_empty() ||
+        !self.cache.inner.memtable.read().entries.is_empty() ||
+        !self.localstore.inner.memtable.read().entries.is_empty() ||
+        !self.settings.inner.memtable.read().entries.is_empty()
     }
 
     pub fn new(path: &Path, config: &ModeConfig) -> Self {
         let max_mem = config.max_memory / 5; // Divide memory among tables
+        let history = LSMTree::new(path, TableType::History, max_mem);
+        let cookies = LSMTree::new(path, TableType::Cookies, max_mem);
+        let cache = LSMTree::new(path, TableType::Cache, max_mem);
+        let localstore = LSMTree::new(path, TableType::LocalStore, max_mem);
+        let settings = LSMTree::new(path, TableType::Settings, max_mem);
+
+        // Apply config
+        history.set_max_level0_files(config.max_level0_files);
+        cookies.set_max_level0_files(config.max_level0_files);
+        cache.set_max_level0_files(config.max_level0_files);
+        localstore.set_max_level0_files(config.max_level0_files);
+        settings.set_max_level0_files(config.max_level0_files);
+
         Self {
             path: path.to_path_buf(),
-            history: LSMTree::new(path, TableType::History, max_mem),
-            cookies: LSMTree::new(path, TableType::Cookies, max_mem),
-            cache: LSMTree::new(path, TableType::Cache, max_mem),
-            localstore: LSMTree::new(path, TableType::LocalStore, max_mem),
-            settings: LSMTree::new(path, TableType::Settings, max_mem),
+            history,
+            cookies,
+            cache,
+            localstore,
+            settings,
         }
     }
 }

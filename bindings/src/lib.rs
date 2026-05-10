@@ -89,6 +89,7 @@ impl BrowserDB {
             max_memory: 1024 * 1024 * 100, // 100MB Default
             enable_compression: false,
             enable_heat_tracking: true,
+            max_level0_files: 4,
         };
         
         let switcher = ModeSwitcher::new(path, DatabaseMode::Persistent, config);

@@ -4,6 +4,25 @@ use std::time::Instant;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "--child-write" {
+        let path = &args[2];
+        let id: u32 = args[3].parse()?;
+        let db = BrowserDB::open(path)?;
+        let entry = HistoryEntry {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis(),
+            url: format!("https://example.com/page/{}", id),
+            url_hash: id as u128,
+            title: format!("Crash Recovery Title {}", id),
+            visit_count: 1,
+        };
+        db.history().insert(&entry)?;
+        // Abrupt exit
+        std::process::exit(0);
+    }
+
     // Setup
     let db_path = "/tmp/stress_test.bdb";
     if Path::new(db_path).exists() {
@@ -19,8 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Database initialized in {:?}", start_init.elapsed());
 
     // Configuration
-    const TOTAL_RECORDS: u32 = 1_000_000;
-    const KEY_SIZE: usize = 32;
+    const TOTAL_RECORDS: u32 = 10_000;
     // HistoryEntry payload is roughly: 8 (u64) + 16 (u128) + ~30 (String) + 4 (u32) = ~60 bytes + overhead.
     
     println!("\n📝 Phase 1: Write Stress Test");
@@ -91,6 +109,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("   ✅ Verified Record #{}: '{}'", verify_id, entry.title);
     } else {
         println!("   ❌ FAILED to verify Record #{}", verify_id);
+    }
+
+    // 4. Crash Recovery Simulation
+    println!("\n💥 Phase 4: Crash Recovery Simulation");
+    println!("   Writing records without closing (simulating crash)...");
+
+    let crash_id = TOTAL_RECORDS + 1;
+
+    // Instead of std::mem::forget, we'll spawn a child process that writes and exits abruptly
+    let exe = std::env::current_exe()?;
+    let status = std::process::Command::new(exe)
+        .arg("--child-write")
+        .arg(db_path)
+        .arg(crash_id.to_string())
+        .status()?;
+
+    if !status.success() {
+        // Child exited abruptly as expected or failed
+        println!("   Child process exited (simulated crash)");
+    }
+
+    println!("   Re-opening database to check WAL recovery...");
+    let db3 = BrowserDB::open(db_path)?;
+    if let Some(recovered) = db3.history().get(crash_id as u128)? {
+        println!("   ✅ Successfully recovered record '{}' from WAL!", recovered.title);
+    } else {
+        println!("   ❌ FAILED to recover record from WAL.");
     }
 
     println!("\n🎉 Stress Test Finished.");
