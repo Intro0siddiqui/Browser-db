@@ -91,7 +91,7 @@ impl BrowserDB {
             enable_heat_tracking: true,
         };
         
-        let switcher = ModeSwitcher::new(path, DatabaseMode::Persistent, config);
+        let switcher = ModeSwitcher::new(path, DatabaseMode::Persistent, config)?;
         Ok(Self {
             switcher: Arc::new(switcher),
         })
