@@ -97,19 +97,34 @@ pub struct SSTable {
 
 pub struct SSTableIterator<'a> {
     sstable: &'a SSTable,
-    current_index: usize,
+    offset: usize,
 }
 
 impl<'a> Iterator for SSTableIterator<'a> {
     type Item = KVEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_index < self.sstable.index.len() {
-            let entry = self.sstable.get_at_index(&self.sstable.index[self.current_index]);
-            self.current_index += 1;
-            return entry;
+        if self.offset >= self.sstable.mmap.len() {
+            return None;
         }
-        None
+
+        let data = &self.sstable.mmap[self.offset..];
+        let mut cursor = io::Cursor::new(data);
+
+        match BDBLogEntry::read(&mut cursor) {
+            Ok(log_entry) => {
+                let size = cursor.position() as usize;
+                self.offset += size;
+                Some(KVEntry {
+                    key: log_entry.key,
+                    value: log_entry.value,
+                    timestamp: log_entry.timestamp,
+                    entry_type: log_entry.entry_type,
+                    deleted: log_entry.entry_type == EntryType::Delete,
+                })
+            }
+            Err(_) => None,
+        }
     }
 }
 
@@ -218,7 +233,7 @@ impl SSTable {
     pub fn iter(&self) -> SSTableIterator<'_> {
         SSTableIterator {
             sstable: self,
-            current_index: 0,
+            offset: 0,
         }
     }
 
@@ -274,11 +289,11 @@ pub struct LSMTreeInner {
     pub base_path: PathBuf,
     pub table_type: TableType,
     pub wal: RwLock<WALManager>,
-    pub heat_tracker: RwLock<HeatTracker>,
+    pub heat_tracker: HeatTracker,
 }
 
 impl LSMTree {
-    pub fn new(base_path: &Path, table_type: TableType, max_memtable_size: usize) -> Self {
+    pub fn new(base_path: &Path, table_type: TableType, max_memtable_size: usize) -> io::Result<Self> {
         let mut levels = Vec::with_capacity(10);
         for _ in 0..10 {
             levels.push(RwLock::new(Vec::new()));
@@ -291,15 +306,14 @@ impl LSMTree {
             TableType::LocalStore => "localstore",
             TableType::Settings => "settings",
         }));
-        let wal = WALManager::new(&wal_path).expect("Failed to initialize WAL");
+        let wal = WALManager::new(&wal_path)?;
 
         let mut memtable = MemTable::new(max_memtable_size, table_type);
 
         // Recover from WAL
-        if let Ok(entries) = wal.read_all() {
-            for entry in entries {
-                memtable.put(entry.key, entry.value, entry.entry_type);
-            }
+        let entries = wal.read_all()?;
+        for entry in entries {
+            memtable.put(entry.key, entry.value, entry.entry_type);
         }
 
         // Recover existing SSTables
@@ -341,16 +355,16 @@ impl LSMTree {
             }
         }
         
-        Self {
+        Ok(Self {
             inner: Arc::new(LSMTreeInner {
                 memtable: RwLock::new(memtable),
                 levels,
                 base_path: base_path.to_path_buf(),
                 table_type,
                 wal: RwLock::new(wal),
-                heat_tracker: RwLock::new(HeatTracker::new(10000)),
+                heat_tracker: HeatTracker::new(10000),
             })
-        }
+        })
     }
     
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> io::Result<()> {
@@ -387,7 +401,7 @@ impl LSMTree {
     }
     
     pub fn get(&self, key: &[u8]) -> Option<KVEntry> {
-        self.inner.heat_tracker.write().record_access(key, QueryType::Read);
+        self.inner.heat_tracker.record_access(key, QueryType::Read);
 
         // 1. MemTable
         if let Some(entry) = self.inner.memtable.read().get(key) {
@@ -513,14 +527,12 @@ impl LSMTree {
             let max_l0_files = 4;
 
             if l0.len() >= max_l0_files {
-                // Prioritize compaction using HeatTracker data
-                // We'll sort L0 files by their aggregate "coldness" (simulated here)
-                // or just take them all if they hit the threshold.
                 let mut tables_to_compact = l0.clone();
+                drop(l0); // Release the write lock on Level 0
 
-                // Use HeatTracker to influence compaction priority
+                // Use HeatTracker to influence compaction priority outside the lock
                 {
-                    let heat = self.inner.heat_tracker.read();
+                    let heat = &self.inner.heat_tracker;
                     tables_to_compact.sort_by_cached_key(|t| {
                         let mut total_heat = 0u64;
                         for idx in &t.index {
@@ -530,15 +542,11 @@ impl LSMTree {
                     });
                 }
 
-                // For Leveled compaction L0 -> L1, we usually take all L0 files
-                let tables_to_compact = l0.clone();
-                drop(l0);
-
                 let inner = Arc::clone(&self.inner);
                 std::thread::spawn(move || {
                     // Record compaction access in heat tracker
                     for table in &tables_to_compact {
-                        let mut ht = inner.heat_tracker.write();
+                        let ht = &inner.heat_tracker;
                         for idx in &table.index {
                             ht.record_access(&idx.key, QueryType::Compact);
                         }
@@ -571,21 +579,21 @@ impl LSMTreeInner {
         let is_final_level = level == 9;
 
         // Multi-way merge sort
-        let mut iterators: Vec<_> = tables.iter().map(|t| t.index.iter().peekable()).collect();
+        let mut iterators: Vec<_> = tables.iter().map(|t| t.iter().peekable()).collect();
         let mut merged_entries: BTreeMap<Vec<u8>, KVEntry> = BTreeMap::new();
 
         loop {
-            let mut min_key: Option<&Vec<u8>> = None;
+            let mut min_key: Option<Vec<u8>> = None;
 
             for iter in iterators.iter_mut() {
-                if let Some(idx_entry) = iter.peek() {
-                    match min_key {
+                if let Some(entry) = iter.peek() {
+                    match &min_key {
                         None => {
-                            min_key = Some(&idx_entry.key);
+                            min_key = Some(entry.key.clone());
                         }
                         Some(key) => {
-                            if idx_entry.key < *key {
-                                min_key = Some(&idx_entry.key);
+                            if entry.key < *key {
+                                min_key = Some(entry.key.clone());
                             }
                         }
                     }
@@ -593,17 +601,15 @@ impl LSMTreeInner {
             }
 
             if let Some(key) = min_key {
-                let key = key.clone();
                 let mut best_entry: Option<KVEntry> = None;
 
-                for (i, iter) in iterators.iter_mut().enumerate() {
+                for iter in iterators.iter_mut() {
                     if let Some(peeked) = iter.peek() {
                         if peeked.key == key {
-                            let entry = tables[i].get_at_index(peeked).unwrap();
+                            let entry = iter.next().unwrap();
                             if best_entry.is_none() || entry.timestamp > best_entry.as_ref().unwrap().timestamp {
                                 best_entry = Some(entry);
                             }
-                            iter.next(); // Advance all iterators with this key
                         }
                     }
                 }
