@@ -39,9 +39,15 @@ pub struct HeatTracker {
     heat_entries: Vec<RwLock<HashMap<Vec<u8>, HeatEntry>>>,
 }
 
+impl Default for HeatTracker {
+    fn default() -> Self {
+        Self::new(10000)
+    }
+}
+
 impl HeatTracker {
     pub fn new(max_entries: usize) -> Self {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let mut heat_entries = Vec::with_capacity(32);
         for _ in 0..32 {
             heat_entries.push(RwLock::new(HashMap::new()));
@@ -67,7 +73,7 @@ impl HeatTracker {
     pub fn record_access(&self, key: &[u8], query_type: QueryType) {
         self.apply_decay();
         
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         
         let increment = match query_type {
             QueryType::Read => 1,
@@ -94,7 +100,7 @@ impl HeatTracker {
         let shard_idx = self.get_shard(key);
         if let Some(entry) = self.heat_entries[shard_idx].read().get(key) {
              // Simple decay simulation for read
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
             let age_seconds = now.saturating_sub(entry.last_access);
             let decay_cycles = age_seconds / 60;
             
@@ -108,7 +114,7 @@ impl HeatTracker {
     }
     
     fn apply_decay(&self) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let last_time = self.last_decay_time.load(Ordering::Acquire);
         if now - last_time < 60 {
             return;
@@ -120,6 +126,8 @@ impl HeatTracker {
         }
         
         // Apply decay to all and remove cold
+        let mut total_entries = 0;
+
         for shard in &self.heat_entries {
             let mut keys_to_remove = Vec::new();
             let mut entries = shard.write();
@@ -132,6 +140,29 @@ impl HeatTracker {
 
             for key in keys_to_remove {
                 entries.remove(&key);
+            }
+            total_entries += entries.len();
+        }
+
+        // If we exceed max_entries, we must apply heat-based eviction
+        if total_entries > self.max_entries {
+            // Collect all entries with their heat
+            let mut all_entries: Vec<(usize, Vec<u8>, u32)> = Vec::new();
+            for (shard_idx, shard) in self.heat_entries.iter().enumerate() {
+                for (key, entry) in shard.read().iter() {
+                    all_entries.push((shard_idx, key.clone(), entry.heat));
+                }
+            }
+
+            let to_remove = total_entries - self.max_entries;
+            all_entries.select_nth_unstable_by(to_remove, |a, b| a.2.cmp(&b.2));
+
+            let to_remove = total_entries - self.max_entries;
+            for (shard_idx, key, heat) in all_entries.into_iter().take(to_remove) {
+                // Evict the coldest entries, particularly those below hot_threshold
+                if heat < self.hot_threshold {
+                    self.heat_entries[shard_idx].write().remove(&key);
+                }
             }
         }
     }
@@ -146,7 +177,7 @@ pub struct BloomFilter {
 impl BloomFilter {
     pub fn new(expected_elements: usize, false_positive_rate: f64) -> Self {
         let optimal_bit_size = -((expected_elements as f64 * false_positive_rate.ln()) / (2.0f64.ln().powi(2))) as usize;
-        let bit_array_size = (optimal_bit_size + 7) / 8;
+        let bit_array_size = optimal_bit_size.div_ceil(8);
         let k = ((optimal_bit_size as f64 / expected_elements as f64) * 2.0f64.ln()) as u32;
         
         Self {

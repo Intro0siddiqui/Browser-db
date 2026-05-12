@@ -3,3 +3,4 @@ pub mod heatmap;
 pub mod lsm_tree;
 pub mod modes;
 pub mod wal;
+pub mod config;
