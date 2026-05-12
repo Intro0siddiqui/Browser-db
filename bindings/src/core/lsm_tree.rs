@@ -49,7 +49,7 @@ impl MemTable {
         let entry = KVEntry {
             key: key.clone(),
             value,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
             entry_type,
             deleted: entry_type == EntryType::Delete,
         };
@@ -101,7 +101,7 @@ pub struct SSTableIterator<'a> {
 }
 
 impl<'a> Iterator for SSTableIterator<'a> {
-    type Item = KVEntry;
+    type Item = io::Result<KVEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.offset >= self.sstable.mmap.len() {
@@ -115,22 +115,22 @@ impl<'a> Iterator for SSTableIterator<'a> {
             Ok(log_entry) => {
                 let size = cursor.position() as usize;
                 self.offset += size;
-                Some(KVEntry {
+                Some(Ok(KVEntry {
                     key: log_entry.key,
                     value: log_entry.value,
                     timestamp: log_entry.timestamp,
                     entry_type: log_entry.entry_type,
                     deleted: log_entry.entry_type == EntryType::Delete,
-                })
+                }))
             }
-            Err(_) => None,
+            Err(e) => Some(Err(e)),
         }
     }
 }
 
 impl SSTable {
     pub fn create(level: u8, entries: &BTreeMap<Vec<u8>, KVEntry>, base_path: &Path, table_type: TableType) -> io::Result<Self> {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?.as_millis();
         let filename = format!("{}_{}_{}_{}.sst", 
             match table_type {
                 TableType::History => "history",
@@ -290,10 +290,11 @@ pub struct LSMTreeInner {
     pub table_type: TableType,
     pub wal: RwLock<WALManager>,
     pub heat_tracker: HeatTracker,
+    pub config: crate::core::config::BrowserDBConfig,
 }
 
 impl LSMTree {
-    pub fn new(base_path: &Path, table_type: TableType, max_memtable_size: usize) -> io::Result<Self> {
+    pub fn new(base_path: &Path, table_type: TableType, max_memtable_size: usize, config: crate::core::config::BrowserDBConfig) -> io::Result<Self> {
         let mut levels = Vec::with_capacity(10);
         for _ in 0..10 {
             levels.push(RwLock::new(Vec::new()));
@@ -362,7 +363,8 @@ impl LSMTree {
                 base_path: base_path.to_path_buf(),
                 table_type,
                 wal: RwLock::new(wal),
-                heat_tracker: HeatTracker::new(10000),
+                heat_tracker: HeatTracker::new(config.heatmap.max_entries),
+                config,
             })
         })
     }
@@ -523,8 +525,7 @@ impl LSMTree {
             l0.push(sstable);
 
             // Check for compaction
-            // In a real scenario, we'd load this from browserdb.toml
-            let max_l0_files = 4;
+            let max_l0_files = self.inner.config.lsm_tree.max_level0_files;
 
             if l0.len() >= max_l0_files {
                 let mut tables_to_compact = l0.clone();
@@ -579,6 +580,9 @@ impl LSMTreeInner {
         let is_final_level = level == 9;
 
         // Multi-way merge sort
+        // We handle Iterator items that are Results now. If an iterator yields an error, we bubble it up.
+        // `peekable` allows looking ahead, but since we have `Result`, peek() returns `&Result`.
+
         let mut iterators: Vec<_> = tables.iter().map(|t| t.iter().peekable()).collect();
         let mut merged_entries: BTreeMap<Vec<u8>, KVEntry> = BTreeMap::new();
 
@@ -586,15 +590,22 @@ impl LSMTreeInner {
             let mut min_key: Option<Vec<u8>> = None;
 
             for iter in iterators.iter_mut() {
-                if let Some(entry) = iter.peek() {
-                    match &min_key {
-                        None => {
-                            min_key = Some(entry.key.clone());
-                        }
-                        Some(key) => {
-                            if entry.key < *key {
-                                min_key = Some(entry.key.clone());
+                if let Some(entry_res) = iter.peek() {
+                    match entry_res {
+                        Ok(entry) => {
+                            match &min_key {
+                                None => {
+                                    min_key = Some(entry.key.clone());
+                                }
+                                Some(key) => {
+                                    if entry.key < *key {
+                                        min_key = Some(entry.key.clone());
+                                    }
+                                }
                             }
+                        }
+                        Err(e) => {
+                            return Err(io::Error::new(e.kind(), format!("Corrupted SSTable encountered during merge: {}", e)));
                         }
                     }
                 }
@@ -604,9 +615,15 @@ impl LSMTreeInner {
                 let mut best_entry: Option<KVEntry> = None;
 
                 for iter in iterators.iter_mut() {
-                    if let Some(peeked) = iter.peek() {
-                        if peeked.key == key {
-                            let entry = iter.next().unwrap();
+                    // Check if the next item belongs to `min_key`
+                    let should_consume = if let Some(Ok(peeked)) = iter.peek() {
+                        peeked.key == key
+                    } else {
+                        false
+                    };
+
+                    if should_consume {
+                        if let Some(Ok(entry)) = iter.next() {
                             if best_entry.is_none() || entry.timestamp > best_entry.as_ref().unwrap().timestamp {
                                 best_entry = Some(entry);
                             }

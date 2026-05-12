@@ -7,6 +7,7 @@ use serde::{Serialize, Deserialize};
 
 pub use crate::core::modes::{DatabaseMode, ModeConfig};
 use crate::core::modes::{ModeSwitcher, CurrentMode};
+use crate::core::config::BrowserDBConfig;
 
 pub mod types {
     pub use super::{HistoryEntry, CookieEntry, CacheEntry, LocalStoreEntry, SettingEntry};
@@ -85,10 +86,13 @@ impl BrowserDB {
             fs::create_dir_all(path)?;
         }
 
+        let ext_config = BrowserDBConfig::load_or_default(path);
+
         let config = ModeConfig {
             max_memory: 1024 * 1024 * 100, // 100MB Default
             enable_compression: false,
             enable_heat_tracking: true,
+            ext_config,
         };
         
         let switcher = ModeSwitcher::new(path, DatabaseMode::Persistent, config)?;
@@ -363,10 +367,12 @@ impl<'a> LocalStoreTable<'a> {
     }
 }
 
+pub type Filter<'a> = Box<dyn Fn(&LocalStoreEntry) -> bool + 'a>;
+
 pub struct QueryBuilder<'q, 'a> {
     table: &'q LocalStoreTable<'a>,
     prefix: Vec<u8>,
-    filters: Vec<Box<dyn Fn(&LocalStoreEntry) -> bool + 'a>>,
+    filters: Vec<Filter<'a>>,
     limit: Option<usize>,
     value_eq: Option<String>,
 }

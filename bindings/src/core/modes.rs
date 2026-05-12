@@ -7,6 +7,7 @@ use crate::core::lsm_tree::LSMTree;
 use crate::core::format::TableType;
 
 use std::fmt;
+use crate::core::config::BrowserDBConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseMode {
@@ -36,6 +37,7 @@ pub struct ModeConfig {
     pub max_memory: usize,
     pub enable_compression: bool,
     pub enable_heat_tracking: bool,
+    pub ext_config: BrowserDBConfig,
 }
 
 pub struct UltraTable {
@@ -43,12 +45,18 @@ pub struct UltraTable {
     pub entry_count: std::sync::atomic::AtomicUsize,
 }
 
-impl UltraTable {
-    pub fn new() -> Self {
+impl Default for UltraTable {
+    fn default() -> Self {
         Self {
             data: RwLock::new(HashMap::new()),
             entry_count: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+}
+
+impl UltraTable {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
@@ -91,14 +99,15 @@ impl PersistentMode {
     }
 
     pub fn new(path: &Path, config: &ModeConfig) -> std::io::Result<Self> {
-        let max_mem = config.max_memory / 5; // Divide memory among tables
+        // max_memtable_size_mb dictates the memtable size in bytes
+        let max_mem = config.ext_config.lsm_tree.max_memtable_size_mb * 1024 * 1024;
         Ok(Self {
             path: path.to_path_buf(),
-            history: LSMTree::new(path, TableType::History, max_mem)?,
-            cookies: LSMTree::new(path, TableType::Cookies, max_mem)?,
-            cache: LSMTree::new(path, TableType::Cache, max_mem)?,
-            localstore: LSMTree::new(path, TableType::LocalStore, max_mem)?,
-            settings: LSMTree::new(path, TableType::Settings, max_mem)?,
+            history: LSMTree::new(path, TableType::History, max_mem, config.ext_config.clone())?,
+            cookies: LSMTree::new(path, TableType::Cookies, max_mem, config.ext_config.clone())?,
+            cache: LSMTree::new(path, TableType::Cache, max_mem, config.ext_config.clone())?,
+            localstore: LSMTree::new(path, TableType::LocalStore, max_mem, config.ext_config.clone())?,
+            settings: LSMTree::new(path, TableType::Settings, max_mem, config.ext_config.clone())?,
         })
     }
 }
@@ -111,8 +120,8 @@ pub struct UltraMode {
     pub settings: UltraTable,
 }
 
-impl UltraMode {
-    pub fn new() -> Self {
+impl Default for UltraMode {
+    fn default() -> Self {
         Self {
             history: UltraTable::new(),
             cookies: UltraTable::new(),
@@ -123,9 +132,15 @@ impl UltraMode {
     }
 }
 
+impl UltraMode {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 pub enum CurrentMode {
     Persistent(PersistentMode),
-    Ultra(UltraMode),
+    Ultra(Box<UltraMode>),
 }
 
 pub struct ModeSwitcher {
@@ -138,7 +153,7 @@ impl ModeSwitcher {
     pub fn new(path: &Path, mode: DatabaseMode, config: ModeConfig) -> std::io::Result<Self> {
         let current = match mode {
             DatabaseMode::Persistent => CurrentMode::Persistent(PersistentMode::new(path, &config)?),
-            DatabaseMode::Ultra => CurrentMode::Ultra(UltraMode::new()),
+            DatabaseMode::Ultra => CurrentMode::Ultra(Box::new(UltraMode::new())),
         };
         
         Ok(Self {
@@ -155,7 +170,7 @@ impl ModeSwitcher {
             DatabaseMode::Persistent => CurrentMode::Persistent(
                 PersistentMode::new(path, &self.config).map_err(ModeSwitchError::IoError)?
             ),
-            DatabaseMode::Ultra => CurrentMode::Ultra(UltraMode::new()),
+            DatabaseMode::Ultra => CurrentMode::Ultra(Box::new(UltraMode::new())),
         };
 
         // Data Migration
