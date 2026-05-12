@@ -125,43 +125,29 @@ impl HeatTracker {
             return;
         }
         
-        // Apply decay to all and remove cold
-        let mut total_entries = 0;
+        let max_per_shard = (self.max_entries / 32).max(1);
 
-        for shard in &self.heat_entries {
-            let mut keys_to_remove = Vec::new();
-            let mut entries = shard.write();
+        for shard_lock in &self.heat_entries {
+            let mut entries = shard_lock.write();
 
-            for (key, entry) in entries.iter_mut() {
-                if entry.heat < 1 {
-                    keys_to_remove.push(key.clone());
-                }
-            }
+            // 1. Remove strictly dead entries (heat < 1)
+            entries.retain(|_, entry| entry.heat >= 1);
 
-            for key in keys_to_remove {
-                entries.remove(&key);
-            }
-            total_entries += entries.len();
-        }
+            // 2. If shard exceeds its sharded capacity, evict coldest
+            if entries.len() > max_per_shard {
+                let mut shard_entries: Vec<(Vec<u8>, u32)> = entries
+                    .iter()
+                    .map(|(k, e)| (k.clone(), e.heat))
+                    .collect();
 
-        // If we exceed max_entries, we must apply heat-based eviction
-        if total_entries > self.max_entries {
-            // Collect all entries with their heat
-            let mut all_entries: Vec<(usize, Vec<u8>, u32)> = Vec::new();
-            for (shard_idx, shard) in self.heat_entries.iter().enumerate() {
-                for (key, entry) in shard.read().iter() {
-                    all_entries.push((shard_idx, key.clone(), entry.heat));
-                }
-            }
+                let to_remove_count = entries.len() - max_per_shard;
+                // Sort by heat ascending
+                shard_entries.select_nth_unstable_by(to_remove_count, |a, b| a.1.cmp(&b.1));
 
-            let to_remove = total_entries - self.max_entries;
-            all_entries.select_nth_unstable_by(to_remove, |a, b| a.2.cmp(&b.2));
-
-            let to_remove = total_entries - self.max_entries;
-            for (shard_idx, key, heat) in all_entries.into_iter().take(to_remove) {
-                // Evict the coldest entries, particularly those below hot_threshold
-                if heat < self.hot_threshold {
-                    self.heat_entries[shard_idx].write().remove(&key);
+                for (key, heat) in shard_entries.into_iter().take(to_remove_count) {
+                    if heat < self.hot_threshold {
+                        entries.remove(&key);
+                    }
                 }
             }
         }

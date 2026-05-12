@@ -318,13 +318,15 @@ impl<'a> LocalStoreTable<'a> {
 
         match &*self.db.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => {
-                pm.localstore.put(primary_key.clone(), value)?;
+                let mut batch = crate::core::lsm_tree::Batch::new();
+                batch.put(primary_key.clone(), value);
                 for field in index_fields {
                     if *field == "value" {
                         let idx_key = format!("idx:localstore:value:{}:{}", entry.value, entry.key);
-                        pm.localstore.put(idx_key.into_bytes(), primary_key.clone())?;
+                        batch.put(idx_key.into_bytes(), primary_key.clone());
                     }
                 }
+                pm.localstore.apply_batch(batch)?;
             },
             CurrentMode::Ultra(um) => {
                 um.localstore.put(primary_key.clone(), value);

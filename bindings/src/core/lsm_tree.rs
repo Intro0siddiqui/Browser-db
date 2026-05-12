@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use parking_lot::RwLock;
 use memmap2::Mmap;
 
-use crate::core::format::{BDBLogEntry, EntryType, TableType};
+use crate::core::format::{BDBLogEntry, EntryType, TableType, BDBFileHeader, BDBFileFooter, BDB_HEADER_SIZE, BDB_FOOTER_SIZE};
 use crate::core::heatmap::{BloomFilter, HeatTracker, QueryType};
 use crate::core::wal::WALManager;
 
@@ -104,11 +104,12 @@ impl<'a> Iterator for SSTableIterator<'a> {
     type Item = io::Result<KVEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.offset >= self.sstable.mmap.len() {
+        let limit = self.sstable.mmap.len().saturating_sub(BDB_FOOTER_SIZE);
+        if self.offset >= limit {
             return None;
         }
 
-        let data = &self.sstable.mmap[self.offset..];
+        let data = &self.sstable.mmap[self.offset..limit];
         let mut cursor = io::Cursor::new(data);
 
         match BDBLogEntry::read(&mut cursor) {
@@ -148,10 +149,17 @@ impl SSTable {
             .create(true)
             .open(&file_path)?;
 
+        let mut header = BDBFileHeader::new(table_type);
+        header.write(&mut file)?;
+        let header_size = BDB_HEADER_SIZE;
+
         // BTreeMap is already sorted by key
         
         let mut index = Vec::new();
-        let mut offset = 0u64;
+        let mut offset = header_size as u64;
+        let mut total_key_size = 0;
+        let mut total_value_size = 0;
+        let mut max_entry_size = 0;
         
         for entry in entries.values() {
             let mut bdb_entry = BDBLogEntry {
@@ -172,7 +180,23 @@ impl SSTable {
             });
             
             offset += size as u64;
+            total_key_size += entry.key.len() as u64;
+            total_value_size += entry.value.len() as u64;
+            max_entry_size = max_entry_size.max(size as u32);
         }
+
+        let footer = BDBFileFooter {
+            entry_count: entries.len() as u64,
+            file_size: offset + BDB_FOOTER_SIZE as u64,
+            data_offset: header_size as u64,
+            max_entry_size,
+            total_key_size,
+            total_value_size,
+            compression_ratio: 100,
+            reserved: [0; 2],
+            file_crc: 0,
+        };
+        footer.write(&mut file)?;
         
         file.sync_all()?;
         
@@ -233,20 +257,28 @@ impl SSTable {
     pub fn iter(&self) -> SSTableIterator<'_> {
         SSTableIterator {
             sstable: self,
-            offset: 0,
+            offset: BDB_HEADER_SIZE,
         }
     }
 
     pub fn open(file_path: PathBuf, level: u8) -> io::Result<Self> {
-        let file = OpenOptions::new().read(true).open(&file_path)?;
+        let mut file = OpenOptions::new().read(true).open(&file_path)?;
+        let _header = BDBFileHeader::read(&mut file)?;
         let mmap = unsafe { Mmap::map(&file)? };
         
+        if mmap.len() < BDB_HEADER_SIZE + BDB_FOOTER_SIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "SSTable too small"));
+        }
+
+        let mut footer_cursor = io::Cursor::new(&mmap[mmap.len()-BDB_FOOTER_SIZE..]);
+        let _footer = BDBFileFooter::read(&mut footer_cursor)?;
+
         let mut index = Vec::new();
-        let mut offset = 0;
-        let len = mmap.len();
+        let mut offset = BDB_HEADER_SIZE;
+        let data_end = mmap.len() - BDB_FOOTER_SIZE;
         
-        while offset < len {
-            let mut cursor = io::Cursor::new(&mmap[offset..]);
+        while offset < data_end {
+            let mut cursor = io::Cursor::new(&mmap[offset..data_end]);
             match BDBLogEntry::read(&mut cursor) {
                 Ok(entry) => {
                     let size = cursor.position() as usize;
@@ -278,13 +310,31 @@ impl SSTable {
     }
 }
 
+pub struct Batch {
+    pub entries: Vec<(Vec<u8>, Vec<u8>, EntryType)>,
+}
+
+impl Batch {
+    pub fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        self.entries.push((key, value, EntryType::Insert));
+    }
+
+    pub fn delete(&mut self, key: Vec<u8>) {
+        self.entries.push((key, Vec::new(), EntryType::Delete));
+    }
+}
+
 #[derive(Clone)]
 pub struct LSMTree {
     pub inner: Arc<LSMTreeInner>,
 }
 
 pub struct LSMTreeInner {
-    pub memtable: RwLock<MemTable>,
+    pub memtable: [RwLock<MemTable>; 16],
     pub levels: Vec<RwLock<Vec<Arc<SSTable>>>>, // 10 levels
     pub base_path: PathBuf,
     pub table_type: TableType,
@@ -309,12 +359,41 @@ impl LSMTree {
         }));
         let wal = WALManager::new(&wal_path)?;
 
-        let mut memtable = MemTable::new(max_memtable_size, table_type);
+        let memtable: [RwLock<MemTable>; 16] = (0..16)
+            .map(|_| RwLock::new(MemTable::new(max_memtable_size / 16, table_type)))
+            .collect::<Vec<_>>()
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to initialize sharded memtable"))?;
 
         // Recover from WAL
         let entries = wal.read_all()?;
+        let mut in_batch = false;
+        let mut batch_entries: Vec<(Vec<u8>, Vec<u8>, EntryType)> = Vec::new();
+
         for entry in entries {
-            memtable.put(entry.key, entry.value, entry.entry_type);
+            match entry.entry_type {
+                EntryType::BatchStart => {
+                    in_batch = true;
+                    batch_entries.clear();
+                }
+                EntryType::BatchEnd => {
+                    if in_batch {
+                        for (k, v, t) in batch_entries.drain(..) {
+                            let shard = (k.first().cloned().unwrap_or(0) % 16) as usize;
+                            memtable[shard].write().put(k, v, t);
+                        }
+                        in_batch = false;
+                    }
+                }
+                _ => {
+                    if in_batch {
+                        batch_entries.push((entry.key, entry.value, entry.entry_type));
+                    } else {
+                        let shard = (entry.key.first().cloned().unwrap_or(0) % 16) as usize;
+                        memtable[shard].write().put(entry.key, entry.value, entry.entry_type);
+                    }
+                }
+            }
         }
 
         // Recover existing SSTables
@@ -358,7 +437,7 @@ impl LSMTree {
         
         Ok(Self {
             inner: Arc::new(LSMTreeInner {
-                memtable: RwLock::new(memtable),
+                memtable,
                 levels,
                 base_path: base_path.to_path_buf(),
                 table_type,
@@ -373,7 +452,8 @@ impl LSMTree {
         let mut wal_entry = BDBLogEntry::new(EntryType::Insert, key.clone(), value.clone());
         self.inner.wal.write().log(&mut wal_entry)?;
 
-        let mut mem = self.inner.memtable.write();
+        let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
+        let mut mem = self.inner.memtable[shard].write();
         mem.put(key, value, EntryType::Insert);
         
         if mem.should_flush() {
@@ -383,10 +463,35 @@ impl LSMTree {
         Ok(())
     }
 
+    pub fn apply_batch(&self, batch: Batch) -> io::Result<()> {
+        let mut wal = self.inner.wal.write();
+        wal.log(&mut BDBLogEntry::new(EntryType::BatchStart, Vec::new(), Vec::new()))?;
+        for (k, v, t) in &batch.entries {
+            wal.log(&mut BDBLogEntry::new(*t, k.clone(), v.clone()))?;
+        }
+        wal.log(&mut BDBLogEntry::new(EntryType::BatchEnd, Vec::new(), Vec::new()))?;
+        drop(wal);
+
+        let mut needs_flush = false;
+        for (k, v, t) in batch.entries {
+            let shard = (k.first().cloned().unwrap_or(0) % 16) as usize;
+            let mut mem = self.inner.memtable[shard].write();
+            mem.put(k, v, t);
+            if mem.should_flush() {
+                needs_flush = true;
+            }
+        }
+
+        if needs_flush {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn clear(&self) -> io::Result<()> {
-        let mut mem = self.inner.memtable.write();
-        mem.clear();
-        drop(mem);
+        for shard in &self.inner.memtable {
+            shard.write().clear();
+        }
 
         let mut levels = Vec::new();
         for l in &self.inner.levels {
@@ -406,7 +511,8 @@ impl LSMTree {
         self.inner.heat_tracker.record_access(key, QueryType::Read);
 
         // 1. MemTable
-        if let Some(entry) = self.inner.memtable.read().get(key) {
+        let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
+        if let Some(entry) = self.inner.memtable[shard].read().get(key) {
             if entry.deleted {
                 return None;
             }
@@ -434,7 +540,8 @@ impl LSMTree {
         let mut wal_entry = BDBLogEntry::new(EntryType::Delete, key.clone(), Vec::new());
         self.inner.wal.write().log(&mut wal_entry)?;
 
-        let mut mem = self.inner.memtable.write();
+        let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
+        let mut mem = self.inner.memtable[shard].write();
         mem.put(key, Vec::new(), EntryType::Delete);
 
         if mem.should_flush() {
@@ -457,8 +564,8 @@ impl LSMTree {
         let mut results: BTreeMap<Vec<u8>, Option<KVEntry>> = BTreeMap::new();
 
         // 1. MemTable
-        {
-            let mem = self.inner.memtable.read();
+        for shard_lock in &self.inner.memtable {
+            let mem = shard_lock.read();
             let range = if prefix.is_empty() {
                 mem.entries.range::<Vec<u8>, _>(..)
             } else {
@@ -508,16 +615,20 @@ impl LSMTree {
     }
     
     pub fn flush(&self) -> io::Result<()> {
-        let mut mem = self.inner.memtable.write();
-        if mem.entries.is_empty() { return Ok(()); }
-        
-        // Clone entries for flushing
-        let entries = mem.entries.clone();
-        mem.clear();
-        drop(mem); // Unlock MemTable
+        let mut all_entries = BTreeMap::new();
+        for shard in &self.inner.memtable {
+            let mut mem = shard.write();
+            let entries = std::mem::take(&mut mem.entries);
+            for (k, v) in entries {
+                all_entries.insert(k, v);
+            }
+            mem.clear();
+        }
+
+        if all_entries.is_empty() { return Ok(()); }
         
         // Create SSTable (Level 0)
-        let sstable = Arc::new(SSTable::create(0, &entries, &self.inner.base_path, self.inner.table_type)?);
+        let sstable = Arc::new(SSTable::create(0, &all_entries, &self.inner.base_path, self.inner.table_type)?);
         
         // Add to Level 0
         {
