@@ -1,0 +1,89 @@
+--- bindings/benches/api_benches.rs
++++ bindings/benches/api_benches.rs
+@@ -1,7 +1,9 @@
+ use criterion::{criterion_group, criterion_main, Criterion};
+-use browserdb::{BrowserDB, LocalStoreEntry};
++use browserdb::{BrowserDB, DatabaseMode, LocalStoreEntry};
+ use tempfile::tempdir;
+ use rand::Rng;
++use std::sync::Arc;
++use std::thread;
+
+ fn bench_api_insert_with_index(c: &mut Criterion) {
+     let dir = tempdir().unwrap();
+@@ -65,37 +67,6 @@
+         })
+     });
+ }
+-
+-criterion_group!(benches, bench_api_insert_with_index, bench_query_builder_latency, bench_multi_threaded_concurrency, bench_mode_comparison);
+-criterion_main!(benches);
+-
+-use std::sync::Arc;
+-use std::thread;
+-
+-fn bench_multi_threaded_concurrency(c: &mut Criterion) {
+-    let dir = tempdir().unwrap();
+-    let db = Arc::new(BrowserDB::open(dir.path()).unwrap());
+-
+-    // Test Multi-threaded Read/Write Contention
+-    c.bench_function("concurrent_rw_100_threads", |b| {
+-        b.iter(|| {
+-            let mut handles = vec![];
+-            for i in 0..100 {
+-                let db_clone = Arc::clone(&db);
+-                handles.push(thread::spawn(move || {
+-                    let table = db_clone.localstore();
+-                    if i % 2 == 0 {
+-                        // Writes
+-                        let entry = LocalStoreEntry {
+-                            origin_hash: 123,
+-                            key: format!("thread_key_{}", i),
+-                            value: "data".to_string(),
+-                        };
+-                        let _ = table.insert(&entry);
+-                    } else {
+-                        // Reads
+-                        let _ = table.get_by_origin(123);
+-                    }
+-                }));
+-            }
+-            for handle in handles {
+-                handle.join().unwrap();
+-            }
+-        });
+-    });
+-}
+-
+-use browserdb::DatabaseMode;
+-
+-fn bench_mode_comparison(c: &mut Criterion) {
+-    let dir = tempdir().unwrap();
+-    let db = BrowserDB::open(dir.path()).unwrap();
+-    let table = db.localstore();
+-    let mut rng = rand::thread_rng();
+-
+-    c.bench_function("mode_comparison_persistent_insert", |b| {
+-        db.set_mode(DatabaseMode::Persistent).unwrap();
+-        b.iter(|| {
+-            let entry = LocalStoreEntry {
+-                origin_hash: rng.gen(),
+-                key: format!("key_{}", rng.gen::<u32>()),
+-                value: "persistent".to_string(),
+-            };
+-            table.insert(&entry).unwrap();
+-        })
+-    });
+-
+-    c.bench_function("mode_comparison_ultra_insert", |b| {
+-        db.set_mode(DatabaseMode::Ultra).unwrap();
+-        b.iter(|| {
+-            let entry = LocalStoreEntry {
+-                origin_hash: rng.gen(),
+-                key: format!("key_{}", rng.gen::<u32>()),
+-                value: "ultra".to_string(),
+-            };
+-            table.insert(&entry).unwrap();
+-        })
+-    });
+-}

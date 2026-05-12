@@ -2,8 +2,12 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use browserdb::core::lsm_tree::{LSMTree, MemTable};
 use browserdb::core::format::{EntryType, TableType, BDBLogEntry};
 use browserdb::core::wal::WALManager;
+use browserdb::core::config::BrowserDBConfig;
 use tempfile::tempdir;
 use rand::Rng;
+use std::sync::Arc;
+use std::thread;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn bench_memtable_insertion(c: &mut Criterion) {
     let mut memtable = MemTable::new(1024 * 1024, TableType::LocalStore);
@@ -36,7 +40,7 @@ fn bench_wal_logging(c: &mut Criterion) {
 
 fn bench_compaction_speed(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let tree = LSMTree::new(dir.path(), TableType::LocalStore, 1024 * 1024);
+    let tree = LSMTree::new(dir.path(), TableType::LocalStore, 1024 * 1024, BrowserDBConfig::default()).unwrap();
 
     // Populate some data
     for i in 0..1000 {
@@ -64,5 +68,40 @@ fn bench_compaction_speed(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_memtable_insertion, bench_wal_logging, bench_compaction_speed);
+fn bench_compaction_stall(c: &mut Criterion) {
+    let dir = tempdir().unwrap();
+    let tree = Arc::new(LSMTree::new(dir.path(), TableType::LocalStore, 1024 * 1024, BrowserDBConfig::default()).unwrap());
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let tree_bg = Arc::clone(&tree);
+    let stop_clone = Arc::clone(&stop_flag);
+
+    // Background thread to simulate a massive write burst triggering compactions continuously
+    let bg_handle = thread::spawn(move || {
+        let mut rng = rand::thread_rng();
+        let mut i = 0;
+        while !stop_clone.load(Ordering::Relaxed) {
+            let key = format!("bg_key_{:08}", i).into_bytes();
+            let value: Vec<u8> = (0..64).map(|_| rng.gen()).collect();
+            let _ = tree_bg.put(key, value);
+            i += 1;
+        }
+    });
+
+    let mut rng = rand::thread_rng();
+
+    // Foreground inserts to measure if they stall
+    c.bench_function("foreground_insert_during_compaction", |b| {
+        b.iter(|| {
+            let key = format!("fg_key_{}", rng.gen::<u32>()).into_bytes();
+            let value: Vec<u8> = (0..64).map(|_| rng.gen()).collect();
+            let _ = tree.put(key, value);
+        })
+    });
+
+    stop_flag.store(true, Ordering::Relaxed);
+    let _ = bg_handle.join();
+}
+
+criterion_group!(benches, bench_memtable_insertion, bench_wal_logging, bench_compaction_speed, bench_compaction_stall);
 criterion_main!(benches);
