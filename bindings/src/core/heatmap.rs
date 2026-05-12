@@ -154,8 +154,8 @@ impl HeatTracker {
                 }
             }
 
-            // Sort by heat ascending
-            all_entries.sort_by(|a, b| a.2.cmp(&b.2));
+            let to_remove = total_entries - self.max_entries;
+            all_entries.select_nth_unstable_by(to_remove, |a, b| a.2.cmp(&b.2));
 
             let to_remove = total_entries - self.max_entries;
             for (shard_idx, key, heat) in all_entries.into_iter().take(to_remove) {
