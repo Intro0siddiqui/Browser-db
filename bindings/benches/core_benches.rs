@@ -94,7 +94,7 @@ fn bench_compaction_stall(c: &mut Criterion) {
         while !stop_clone.load(Ordering::Relaxed) {
             let key = format!("bg_key_{:08}", i).into_bytes();
             let value: Vec<u8> = (0..64).map(|_| rng.gen()).collect();
-            let _ = tree_bg.put(key, value);
+            tree_bg.put(key, value).unwrap();
             i += 1;
         }
     });
@@ -110,7 +110,7 @@ fn bench_compaction_stall(c: &mut Criterion) {
                 (key, value)
             },
             |(key, value)| {
-                let _ = tree.put(key, value);
+                tree.put(key, value).unwrap();
             },
             BatchSize::SmallInput,
         )

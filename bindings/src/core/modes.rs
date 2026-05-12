@@ -91,11 +91,11 @@ pub struct PersistentMode {
 
 impl PersistentMode {
     pub fn has_unsynced_data(&self) -> bool {
-        !self.history.inner.memtable.read().entries.is_empty() ||
-        !self.cookies.inner.memtable.read().entries.is_empty() ||
-        !self.cache.inner.memtable.read().entries.is_empty() ||
-        !self.localstore.inner.memtable.read().entries.is_empty() ||
-        !self.settings.inner.memtable.read().entries.is_empty()
+        self.history.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
+        self.cookies.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
+        self.cache.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
+        self.localstore.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
+        self.settings.inner.memtable.iter().any(|m| !m.read().entries.is_empty())
     }
 
     pub fn new(path: &Path, config: &ModeConfig) -> std::io::Result<Self> {

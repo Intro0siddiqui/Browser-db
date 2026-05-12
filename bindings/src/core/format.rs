@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MAGIC_BYTES: &[u8; 9] = b"BROWSERDB";
 pub const BDB_VERSION: u8 = 1;
+pub const BDB_HEADER_SIZE: usize = 47;
+pub const BDB_FOOTER_SIZE: usize = 52;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

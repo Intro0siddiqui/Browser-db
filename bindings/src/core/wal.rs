@@ -1,11 +1,17 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 use crate::core::format::BDBLogEntry;
 
 pub struct WALManager {
-    file: File,
+    writer: Arc<Mutex<BufWriter<File>>>,
     path: PathBuf,
+    stop_signal: Arc<AtomicBool>,
+    flush_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl WALManager {
@@ -16,19 +22,52 @@ impl WALManager {
             .read(true)
             .open(path)?;
 
+        let writer = Arc::new(Mutex::new(BufWriter::with_capacity(32 * 1024, file)));
+        let stop_signal = Arc::new(AtomicBool::new(false));
+
+        let writer_clone = Arc::clone(&writer);
+        let stop_signal_clone = Arc::clone(&stop_signal);
+
+        let flush_thread = thread::spawn(move || {
+            let mut last_flush = Instant::now();
+            while !stop_signal_clone.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(5));
+                if last_flush.elapsed() >= Duration::from_millis(5) {
+                    let mut w = writer_clone.lock().unwrap();
+                    let _ = w.flush();
+                    if w.get_ref().sync_all().is_ok() {
+                        last_flush = Instant::now();
+                    }
+                }
+            }
+            // Final flush
+            let mut w = writer_clone.lock().unwrap();
+            let _ = w.flush();
+            let _ = w.get_ref().sync_all();
+        });
+
         Ok(Self {
-            file,
+            writer,
             path: path.to_path_buf(),
+            stop_signal,
+            flush_thread: Some(flush_thread),
         })
     }
 
     pub fn log(&mut self, entry: &mut BDBLogEntry) -> io::Result<()> {
-        entry.write(&mut self.file)?;
-        self.file.sync_all()?;
+        let mut w = self.writer.lock().unwrap();
+        entry.write(&mut *w)?;
         Ok(())
     }
 
     pub fn read_all(&self) -> io::Result<Vec<BDBLogEntry>> {
+        // Ensure everything is flushed before reading
+        {
+            let mut w = self.writer.lock().unwrap();
+            w.flush()?;
+            w.get_ref().sync_all()?;
+        }
+
         let file = File::open(&self.path)?;
         let mut reader = BufReader::new(file);
         let mut entries = Vec::new();
@@ -41,9 +80,21 @@ impl WALManager {
     }
 
     pub fn truncate(&mut self) -> io::Result<()> {
-        self.file.set_len(0)?;
-        self.file.sync_all()?;
+        let mut w = self.writer.lock().unwrap();
+        w.flush()?;
+        let file = w.get_mut();
+        file.set_len(0)?;
+        file.sync_all()?;
         Ok(())
+    }
+}
+
+impl Drop for WALManager {
+    fn drop(&mut self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.flush_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
