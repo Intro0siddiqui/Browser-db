@@ -6,10 +6,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::BTreeMap;
 use parking_lot::RwLock;
 use memmap2::Mmap;
+use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 
-use crate::core::format::{BDBLogEntry, EntryType, TableType, BDBFileHeader, BDBFileFooter, BDB_HEADER_SIZE, BDB_FOOTER_SIZE};
+use crate::core::format::{BDBLogEntry, EntryType, TableType, BDBFileHeader, BDBFileFooter, BDB_HEADER_SIZE, BDB_FOOTER_SIZE, BDB_BLOCK_SIZE};
 use crate::core::heatmap::{BloomFilter, HeatTracker, QueryType};
 use crate::core::wal::WALManager;
+use crate::core::blob_log::{BlobLog, BlobPointer};
 
 #[derive(Debug, Clone)]
 pub struct KVEntry {
@@ -93,23 +95,29 @@ pub struct SSTable {
     pub mmap: Mmap,
     pub index: Vec<IndexEntry>,
     pub bloom_filter: Option<BloomFilter>,
+    pub block_checksums: Vec<u32>,
 }
 
 pub struct SSTableIterator<'a> {
     sstable: &'a SSTable,
     offset: usize,
+    limit: usize,
 }
 
 impl<'a> Iterator for SSTableIterator<'a> {
     type Item = io::Result<KVEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let limit = self.sstable.mmap.len().saturating_sub(BDB_FOOTER_SIZE);
-        if self.offset >= limit {
+        if self.offset >= self.limit {
             return None;
         }
 
-        let data = &self.sstable.mmap[self.offset..limit];
+        // Verify block checksum before reading entry
+        if let Err(e) = self.sstable.verify_blocks(self.offset, self.offset + 1) {
+            return Some(Err(e));
+        }
+
+        let data = &self.sstable.mmap[self.offset..self.limit];
         let mut cursor = io::Cursor::new(data);
 
         match BDBLogEntry::read(&mut cursor) {
@@ -130,6 +138,29 @@ impl<'a> Iterator for SSTableIterator<'a> {
 }
 
 impl SSTable {
+    pub fn verify_blocks(&self, start_pos: usize, end_pos: usize) -> io::Result<()> {
+        let first_block = (start_pos - BDB_HEADER_SIZE) / BDB_BLOCK_SIZE;
+        let last_block = (end_pos - 1 - BDB_HEADER_SIZE) / BDB_BLOCK_SIZE;
+
+        for i in first_block..=last_block {
+            let block_start = BDB_HEADER_SIZE + i * BDB_BLOCK_SIZE;
+            let block_end = (block_start + BDB_BLOCK_SIZE).min(self.mmap.len() - BDB_FOOTER_SIZE - self.block_checksums.len() * 4);
+
+            if block_start >= block_end { continue; }
+
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&self.mmap[block_start..block_end]);
+            let actual_crc = hasher.finalize();
+
+            if let Some(&expected_crc) = self.block_checksums.get(i) {
+                if actual_crc != expected_crc {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Block {} checksum mismatch", i)));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn create(level: u8, entries: &BTreeMap<Vec<u8>, KVEntry>, base_path: &Path, table_type: TableType) -> io::Result<Self> {
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?.as_millis();
         let filename = format!("{}_{}_{}_{}.sst", 
@@ -185,10 +216,34 @@ impl SSTable {
             max_entry_size = max_entry_size.max(size as u32);
         }
 
+        let data_end = offset;
+
+        // Calculate Block Checksums
+        file.sync_all()?;
+        let mmap_for_crc = unsafe { Mmap::map(&file)? };
+        let mut block_checksums = Vec::new();
+        let mut curr = BDB_HEADER_SIZE;
+        while curr < data_end as usize {
+            let end = (curr + BDB_BLOCK_SIZE).min(data_end as usize);
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&mmap_for_crc[curr..end]);
+            block_checksums.push(hasher.finalize());
+            curr = end;
+        }
+        drop(mmap_for_crc);
+
+        // Write Checksums to file
+        let crc_offset = offset;
+        for &crc in &block_checksums {
+            file.write_u32::<LittleEndian>(crc)?;
+            offset += 4;
+        }
+
         let footer = BDBFileFooter {
             entry_count: entries.len() as u64,
             file_size: offset + BDB_FOOTER_SIZE as u64,
             data_offset: header_size as u64,
+            block_crc_offset: crc_offset,
             max_entry_size,
             total_key_size,
             total_value_size,
@@ -214,6 +269,7 @@ impl SSTable {
             mmap,
             index,
             bloom_filter: Some(bloom),
+            block_checksums,
         })
     }
     
@@ -239,6 +295,11 @@ impl SSTable {
 
         if end > self.mmap.len() { return None; }
 
+        // Verify block checksums
+        if let Err(_) = self.verify_blocks(start, end) {
+            return None;
+        }
+
         let data = &self.mmap[start..end];
         let mut cursor = io::Cursor::new(data);
 
@@ -255,9 +316,11 @@ impl SSTable {
     }
 
     pub fn iter(&self) -> SSTableIterator<'_> {
+        let limit = self.mmap.len() - BDB_FOOTER_SIZE - self.block_checksums.len() * 4;
         SSTableIterator {
             sstable: self,
             offset: BDB_HEADER_SIZE,
+            limit,
         }
     }
 
@@ -271,11 +334,21 @@ impl SSTable {
         }
 
         let mut footer_cursor = io::Cursor::new(&mmap[mmap.len()-BDB_FOOTER_SIZE..]);
-        let _footer = BDBFileFooter::read(&mut footer_cursor)?;
+        let footer = BDBFileFooter::read(&mut footer_cursor)?;
+
+        // Load block checksums
+        let mut block_checksums = Vec::new();
+        let num_blocks = (footer.block_crc_offset - footer.data_offset + BDB_BLOCK_SIZE as u64 - 1) / BDB_BLOCK_SIZE as u64;
+        let mut crc_cursor = io::Cursor::new(&mmap[footer.block_crc_offset as usize..(mmap.len() - BDB_FOOTER_SIZE)]);
+        for _ in 0..num_blocks {
+            if let Ok(crc) = crc_cursor.read_u32::<LittleEndian>() {
+                block_checksums.push(crc);
+            }
+        }
 
         let mut index = Vec::new();
         let mut offset = BDB_HEADER_SIZE;
-        let data_end = mmap.len() - BDB_FOOTER_SIZE;
+        let data_end = footer.block_crc_offset as usize;
         
         while offset < data_end {
             let mut cursor = io::Cursor::new(&mmap[offset..data_end]);
@@ -306,6 +379,7 @@ impl SSTable {
             mmap,
             index,
             bloom_filter: Some(bloom),
+            block_checksums,
         })
     }
 }
@@ -339,6 +413,7 @@ pub struct LSMTreeInner {
     pub base_path: PathBuf,
     pub table_type: TableType,
     pub wal: RwLock<WALManager>,
+    pub blob_log: Arc<BlobLog>,
     pub heat_tracker: HeatTracker,
     pub config: crate::core::config::BrowserDBConfig,
 }
@@ -358,6 +433,15 @@ impl LSMTree {
             TableType::Settings => "settings",
         }));
         let wal = WALManager::new(&wal_path)?;
+
+        let blob_path = base_path.join(format!("{}.blob", match table_type {
+            TableType::History => "history",
+            TableType::Cookies => "cookies",
+            TableType::Cache => "cache",
+            TableType::LocalStore => "localstore",
+            TableType::Settings => "settings",
+        }));
+        let blob_log = Arc::new(BlobLog::open(&blob_path)?);
 
         let memtable: [RwLock<MemTable>; 16] = (0..16)
             .map(|_| RwLock::new(MemTable::new(max_memtable_size / 16, table_type)))
@@ -442,6 +526,7 @@ impl LSMTree {
                 base_path: base_path.to_path_buf(),
                 table_type,
                 wal: RwLock::new(wal),
+                blob_log,
                 heat_tracker: HeatTracker::new(config.heatmap.max_entries),
                 config,
             })
@@ -449,12 +534,19 @@ impl LSMTree {
     }
     
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> io::Result<()> {
-        let mut wal_entry = BDBLogEntry::new(EntryType::Insert, key.clone(), value.clone());
+        let (entry_type, stored_value) = if value.len() > 64 * 1024 {
+            let ptr = self.inner.blob_log.put(&value)?;
+            (EntryType::BlobIndex, ptr.encode())
+        } else {
+            (EntryType::Insert, value)
+        };
+
+        let mut wal_entry = BDBLogEntry::new(entry_type, key.clone(), stored_value.clone());
         self.inner.wal.write().log(&mut wal_entry)?;
 
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
         let mut mem = self.inner.memtable[shard].write();
-        mem.put(key, value, EntryType::Insert);
+        mem.put(key, stored_value, entry_type);
         
         if mem.should_flush() {
             drop(mem); // unlock
@@ -512,9 +604,18 @@ impl LSMTree {
 
         // 1. MemTable
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
-        if let Some(entry) = self.inner.memtable[shard].read().get(key) {
+        let entry_opt = self.inner.memtable[shard].read().get(key);
+
+        if let Some(mut entry) = entry_opt {
             if entry.deleted {
                 return None;
+            }
+            if entry.entry_type == EntryType::BlobIndex {
+                if let Some(ptr) = BlobPointer::decode(&entry.value) {
+                    if let Ok(val) = self.inner.blob_log.get(&ptr) {
+                        entry.value = val;
+                    }
+                }
             }
             return Some(entry);
         }
@@ -524,9 +625,16 @@ impl LSMTree {
             let sstables = level.read();
             // Search newest SSTables first (usually end of list)
             for sstable in sstables.iter().rev() {
-                if let Some(entry) = sstable.get(key) {
+                if let Some(mut entry) = sstable.get(key) {
                     if entry.deleted {
                         return None;
+                    }
+                    if entry.entry_type == EntryType::BlobIndex {
+                        if let Some(ptr) = BlobPointer::decode(&entry.value) {
+                            if let Ok(val) = self.inner.blob_log.get(&ptr) {
+                                entry.value = val;
+                            }
+                        }
                     }
                     return Some(entry);
                 }
@@ -634,46 +742,10 @@ impl LSMTree {
         {
             let mut l0 = self.inner.levels[0].write();
             l0.push(sstable);
-
-            // Check for compaction
-            let max_l0_files = self.inner.config.lsm_tree.max_level0_files;
-
-            if l0.len() >= max_l0_files {
-                let mut tables_to_compact = l0.clone();
-                drop(l0); // Release the write lock on Level 0
-
-                // Use HeatTracker to influence compaction priority outside the lock
-                {
-                    let heat = &self.inner.heat_tracker;
-                    tables_to_compact.sort_by_cached_key(|t| {
-                        let mut total_heat = 0u64;
-                        for idx in &t.index {
-                            total_heat += heat.get_heat(&idx.key) as u64;
-                        }
-                        total_heat / t.index.len().max(1) as u64
-                    });
-                }
-
-                let inner = Arc::clone(&self.inner);
-                std::thread::spawn(move || {
-                    // Record compaction access in heat tracker
-                    for table in &tables_to_compact {
-                        let ht = &inner.heat_tracker;
-                        for idx in &table.index {
-                            ht.record_access(&idx.key, QueryType::Compact);
-                        }
-                    }
-
-                    if let Ok(new_sst) = inner.merge_sstables(1, tables_to_compact.clone()) {
-                        let mut l0 = inner.levels[0].write();
-                        let mut l1 = inner.levels[1].write();
-
-                        l0.retain(|t| !tables_to_compact.iter().any(|tc| tc.file_path == t.file_path));
-                        l1.push(new_sst);
-                    }
-                });
-            }
         }
+
+        // Trigger cascading compaction starting from Level 0
+        self.inner.clone().trigger_compaction(0);
 
         // Truncate WAL after successful flush
         self.inner.wal.write().truncate()?;
@@ -687,6 +759,93 @@ impl LSMTree {
 }
 
 impl LSMTreeInner {
+    pub fn trigger_compaction(self: Arc<Self>, level: usize) {
+        if level >= 9 { return; }
+
+        let (should_compact, mut tables_to_compact) = {
+            let levels = self.levels[level].read();
+            if level == 0 {
+                if levels.len() >= self.config.lsm_tree.max_level0_files {
+                    (true, levels.clone())
+                } else {
+                    (false, vec![])
+                }
+            } else {
+                let total_size: u64 = levels.iter().map(|s| s.mmap.len() as u64).sum();
+                let threshold = self.config.lsm_tree.level_size_thresholds_mb.get(level - 1)
+                    .cloned()
+                    .unwrap_or(10 * 10usize.pow(level as u32 - 1)) as u64 * 1024 * 1024;
+
+                if total_size > threshold {
+                    (true, levels.clone())
+                } else {
+                    (false, vec![])
+                }
+            }
+        };
+
+        if should_compact {
+            if level == 0 {
+                // Use HeatTracker to influence compaction priority for L0
+                let heat = &self.heat_tracker;
+                tables_to_compact.sort_by_cached_key(|t| {
+                    let mut total_heat = 0u64;
+                    for idx in &t.index {
+                        total_heat += heat.get_heat(&idx.key) as u64;
+                    }
+                    total_heat / t.index.len().max(1) as u64
+                });
+            }
+
+            let inner = Arc::clone(&self);
+            std::thread::spawn(move || {
+                inner.run_compaction_cascade(level, tables_to_compact);
+            });
+        }
+    }
+
+    fn run_compaction_cascade(self: Arc<Self>, level: usize, tables_to_compact: Vec<Arc<SSTable>>) {
+        // Record compaction access in heat tracker
+        for table in &tables_to_compact {
+            let ht = &self.heat_tracker;
+            for idx in &table.index {
+                ht.record_access(&idx.key, QueryType::Compact);
+            }
+        }
+
+        if let Ok(new_sst) = self.merge_sstables((level + 1) as u8, tables_to_compact.clone()) {
+            let next_level = level + 1;
+            {
+                let mut current_lvl = self.levels[level].write();
+                let mut next_lvl = self.levels[next_level].write();
+
+                current_lvl.retain(|t| !tables_to_compact.iter().any(|tc| tc.file_path == t.file_path));
+                next_lvl.push(new_sst);
+            }
+
+            // Cascade to next level if threshold exceeded
+            if next_level < 9 {
+                let (should_compact_next, tables_next) = {
+                    let levels = self.levels[next_level].read();
+                    let total_size: u64 = levels.iter().map(|s| s.mmap.len() as u64).sum();
+                    let threshold = self.config.lsm_tree.level_size_thresholds_mb.get(next_level - 1)
+                        .cloned()
+                        .unwrap_or(10 * 10usize.pow(next_level as u32 - 1)) as u64 * 1024 * 1024;
+
+                    if total_size > threshold {
+                        (true, levels.clone())
+                    } else {
+                        (false, vec![])
+                    }
+                };
+
+                if should_compact_next {
+                    self.run_compaction_cascade(next_level, tables_next);
+                }
+            }
+        }
+    }
+
     pub fn merge_sstables(&self, level: u8, tables: Vec<Arc<SSTable>>) -> io::Result<Arc<SSTable>> {
         let is_final_level = level == 9;
 

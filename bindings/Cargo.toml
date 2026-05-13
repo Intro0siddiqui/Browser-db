@@ -19,6 +19,7 @@ serde = { version = "1.0", features = ["derive"] }
 
 # 并发支持
 parking_lot = "0.12"
+fs2 = "0.4"
 
 # 日志
 tracing = "0.1"
