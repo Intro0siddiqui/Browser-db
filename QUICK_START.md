@@ -12,13 +12,6 @@ rustc --version  # Should be 1.75+
 cargo --version  # Should be 1.75+
 ```
 
-**Installing Rust:**
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
-rustup toolchain install stable
-```
-
 ## 🏗️ Installation
 
 ### Step 1: Clone the Repository
@@ -32,12 +25,6 @@ cd browserdb/bindings
 cargo build --release
 ```
 
-**Expected output:**
-```
-Compiling browserdb v0.1.0
-Finished release [optimized] target(s) in ...s
-```
-
 ### Step 3: Run Tests (Optional)
 ```bash
 cargo test
@@ -47,69 +34,38 @@ cargo test
 
 ### Basic Usage Example
 
-Create a file called `hello_browserdb.rs` in `examples/`:
-
 ```rust
 use browserdb::{BrowserDB, HistoryEntry};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Open/create a database
-    let db = BrowserDB::open("hello_world.bdb")?;
+    // 1. Open/create a database directory
+    let db = BrowserDB::open("my_db")?;
     
     // 2. Store some data using the type-safe API
     db.history().insert(&HistoryEntry {
         timestamp: 1234567890,
+        url: "https://rust-lang.org".to_string(),
         url_hash: 123,
-        title: "My First Page".to_string(),
+        title: "Rust Programming Language".to_string(),
         visit_count: 1
     })?;
     
     // 3. Retrieve data
     if let Some(entry) = db.history().get(123)? {
-        println!("Found: {:?}", entry);
-    } else {
-        println!("Not found!");
+        println!("Found: {:?}", entry.title);
     }
     
     Ok(())
 }
 ```
 
-### Running Your First Program
+## 🏃‍♂️ Performance Check
+
+Run the built-in stress test to see BrowserDB in action:
 
 ```bash
-cargo run --example basic_usage
+cargo run --release --example stress_test
 ```
-
-## ⚡ Performance Tips
-
-### 1. Use Raw Core for Speed
-If you need maximum throughput (logs, cache, history), use the raw Rust API (`db.history().insert(...)`).
-
-## 🚨 Troubleshooting
-
-### Common Issues
-
-**1. Build Failures**
-```bash
-# Clean build
-cargo clean && cargo build --release
-```
-
-**2. Permission Errors**
-Ensure the application has write permissions to the directory where `.bdb` files are created.
-
-### Getting Help
-
-1. **Check Documentation**: See [USER_MANUAL.md](USER_MANUAL.md)
-2. **GitHub Issues**: [Report bugs](https://github.com/browserdb/browserdb/issues)
-
-## 🎯 Next Steps
-
-### What's Next
-- **📚 User Manual**: Deep dive into all features
-- **🛠️ Developer Guide**: Architecture and customization
-- **🔧 API Reference**: Complete function documentation
 
 ---
 

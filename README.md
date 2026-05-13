@@ -50,8 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Feature | BrowserDB (Rust) | IndexedDB | SQLite |
 |---------|-----------|-----------|---------|
-| **Read Performance** | **120K+ ops/sec** | 10K ops/sec | 50K ops/sec |
-| **Write Performance** | **100K+ ops/sec** | 1K ops/sec | 10K ops/sec |
+| **Read Performance** | **900K+ ops/sec** | 10K ops/sec | 50K ops/sec |
+| **Write Performance** | **390K+ ops/sec** | 1K ops/sec | 10K ops/sec |
 | **Memory Efficiency** | <50MB | 100MB+ | 80MB+ |
 | **Cache Hit Rate** | 95% | 70% | 85% |
 | **Query Latency** | <0.1ms | 10ms | 2ms |
@@ -84,25 +84,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Core Components
 
-- **🔥 HeatMap Indexing**: Intelligent caching with 95% hit rates
-- **⚡ LSM-Tree Storage**: Optimized BTreeMap-based MemTable and SSTables
-- **🗂️ .bdb Format**: Universal browser database format
-- **🔄 Mode Operations**: Persistent vs Ultra (in-memory) modes
-- **🛡️ Data Integrity**: CRC32 validation and corruption recovery
+- **🔥 HeatMap Indexing**: Intelligent sharded HeatTracker for hot data prioritization
+- **⚡ LSM-Tree Storage**: Optimized sharded MemTable (16 shards) and 10-level SSTables
+- **🗂️ .bdb Format**: Universal browser database format with CRC32 integrity
+- **🔄 Mode Operations**: Persistent (LSM-Tree) vs Ultra (In-memory HashMap) modes
+- **🛡️ Data Durability**: WAL with background group-commit (5ms flush)
+- **📦 Blob Storage**: Efficient handling of large values (>64KB) outside the LSM-tree
+- **🔗 C/FFI Bindings**: Stable C-API for multi-language integration (C/C++, Python, etc.)
 
 ## 🚀 Key Features
 
 ### Performance
-- **120K+ reads/second** - Sub-millisecond query response
-- **100K+ writes/second** - High-throughput data ingestion
-- **95% cache hit rate** - Intelligent HeatMap optimization
-- **<50MB memory footprint** - Efficient resource usage
+- **900K+ reads/second** - Sub-millisecond random query response
+- **390K+ writes/second** - High-throughput data ingestion with sharded locks
+- **Intelligent HeatMap** - Access-frequency tracking for compaction and cache priority
+- **<50MB memory footprint** - Efficient resource usage with configurable memtables
 
 ### Reliability
-- **Atomic operations** - ACID compliance for data integrity
-- **Corruption recovery** - Automatic detection and repair
-- **Multi-mode support** - Persistent and Ultra (RAM) modes
-- **Zero Dependencies** - Pure Rust implementation
+- **Atomic operations** - WAL-backed atomic batch operations
+- **Crash Recovery** - Automatic WAL recovery on startup
+- **Multi-mode support** - Persistent (LSM) and Ultra (RAM) modes
+- **Pure Rust** - High-performance implementation in safe Rust
 
 ## 🏃‍♂️ Performance Benchmarks
 
@@ -112,8 +114,8 @@ cd bindings
 cargo run --release --example stress_test
 
 # Recent Results (Typical on modern hardware):
-# Write Throughput:     100,529 ops/sec
-# Read Throughput:      120,192 ops/sec
+# Write Throughput:     390,165 ops/sec
+# Read Throughput:      903,421 ops/sec
 # Persistence:          Verified
 ```
 

@@ -1,9 +1,11 @@
 pub mod core;
+pub mod ffi;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::fs;
+use std::{fs::{self, File}, io};
 use serde::{Serialize, Deserialize};
+use fs2::FileExt;
 
 pub use crate::core::modes::{DatabaseMode, ModeConfig};
 use crate::core::modes::{ModeSwitcher, CurrentMode};
@@ -77,13 +79,35 @@ pub struct SettingEntry {
 
 pub struct BrowserDB {
     switcher: Arc<ModeSwitcher>,
+    _lock_file: File,
 }
 
 impl BrowserDB {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open_with_locking(path, true)
+    }
+
+    pub fn open_without_locking<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open_with_locking(path, false)
+    }
+
+    fn open_with_locking<P: AsRef<Path>>(path: P, use_locking: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let path = path.as_ref();
         if !path.exists() {
             fs::create_dir_all(path)?;
+        }
+
+        let lock_path = path.join("browserdb.lock");
+        let lock_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(lock_path)?;
+
+        if use_locking {
+            lock_file.try_lock_exclusive().map_err(|_| {
+                io::Error::new(io::ErrorKind::Other, "Database is already in use by another process")
+            })?;
         }
 
         let ext_config = BrowserDBConfig::load_or_default(path);
@@ -98,6 +122,7 @@ impl BrowserDB {
         let switcher = ModeSwitcher::new(path, DatabaseMode::Persistent, config)?;
         Ok(Self {
             switcher: Arc::new(switcher),
+            _lock_file: lock_file,
         })
     }
 

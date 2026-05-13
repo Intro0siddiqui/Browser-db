@@ -1,8 +1,7 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct BDBKey {
@@ -162,8 +161,9 @@ pub struct BloomFilter {
 
 impl BloomFilter {
     pub fn new(expected_elements: usize, false_positive_rate: f64) -> Self {
+        let expected_elements = expected_elements.max(1);
         let optimal_bit_size = -((expected_elements as f64 * false_positive_rate.ln()) / (2.0f64.ln().powi(2))) as usize;
-        let bit_array_size = optimal_bit_size.div_ceil(8);
+        let bit_array_size = optimal_bit_size.div_ceil(8).max(1);
         let k = ((optimal_bit_size as f64 / expected_elements as f64) * 2.0f64.ln()) as u32;
         
         Self {

@@ -17,11 +17,11 @@ Complete guide to using BrowserDB effectively in your applications.
 ### Database Creation and Opening
 
 ```rust
-use browserdb::{BrowserDB, HistoryEntry};
+use browserdb::BrowserDB;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Open or create a database at the specified path
-    let db = BrowserDB::open("my_app.bdb")?;
+    // Open or create a database directory
+    let db = BrowserDB::open("my_app_data")?;
     
     Ok(())
 }
@@ -29,105 +29,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Database Modes
 
-BrowserDB automatically manages data in **Persistent Mode** (disk-backed) by default. It uses an LSM-Tree structure to ensure high-speed writes and crash recovery.
+BrowserDB supports two primary modes:
+- **Persistent Mode** (Default): Disk-backed storage using LSM-Trees and WAL.
+- **Ultra Mode**: Pure in-memory `HashMap` storage for maximum speed but no persistence.
+
+You can switch modes at runtime:
+```rust
+db.set_mode(browserdb::DatabaseMode::Ultra)?;
+```
 
 ---
 
 ## 🗄️ Core Data Tables
 
-BrowserDB organizes data into specialized tables for common browser use cases. Each table provides a type-safe API.
+BrowserDB organizes data into specialized tables. Each table provides a type-safe API.
 
 ### Available Tables
 - `history()`: Browsing history
 - `cookies()`: HTTP Cookies
 - `cache()`: Web resources
-- `localstore()`: LocalStorage data
-- `settings()`: Application preferences
+- `localstore()`: Origin-based key-value data with indexing
+- `settings()`: General application preferences
 
-### Basic CRUD Operations
+### Basic Operations
 
 #### 1. History Table
 ```rust
 use browserdb::HistoryEntry;
 
-// Insert
 db.history().insert(&HistoryEntry {
     timestamp: 1234567890,
+    url: "https://example.com".to_string(),
     url_hash: 987654321,
-    title: "Rust Lang".to_string(),
+    title: "Example Site".to_string(),
     visit_count: 5,
 })?;
 
-// Get
-if let Some(entry) = db.history().get(987654321)? {
-    println!("Visited: {}", entry.title);
-}
+let entry = db.history().get(987654321)?;
 ```
 
-#### 2. Cookies Table
+#### 2. LocalStore Table (Indexed)
 ```rust
-use browserdb::CookieEntry;
+use browserdb::LocalStoreEntry;
 
-let mut cookie = CookieEntry::new(
-    12345, // Domain Hash
-    "session_id".to_string(),
-    "xyz-token".to_string(),
-    1700000000 // Expiry
-);
-cookie.set_secure();
-cookie.set_httponly();
+let entry = LocalStoreEntry {
+    origin_hash: 111222,
+    key: "user_prefs".to_string(),
+    value: "{\"theme\": \"dark\"}".to_string(),
+};
 
-db.cookies().insert(&cookie)?;
+// Insert with secondary index on the 'value' field
+db.localstore().insert_with_index(&entry, &["value"])?;
+
+// Query using the index
+let results = db.localstore().query()
+    .value_eq("{\"theme\": \"dark\"}".to_string())
+    .execute()?;
 ```
 
-#### 3. Settings Table (Key-Value)
+#### 3. Settings Table
 ```rust
-// Set preference
-db.settings().set("theme", "dark")?;
-
-// Get preference
-if let Some(theme) = db.settings().get("theme")? {
-    println!("Theme: {}", theme);
-}
+db.settings().set("app_version", "1.0.0")?;
+let version = db.settings().get("app_version")?;
 ```
 
 ---
 
 ## ⚡ Performance Optimization
 
-### 1. Use the Right Tool
-- **Raw Core Tables:** Use for high-frequency logging, caching, and history (700k+ writes/sec).
+### 1. Batch Operations
+For `localstore`, you can use `insert_with_index` which performs atomic updates to both the primary data and indices.
 
-### 2. Persistence
-BrowserDB uses an LSM-Tree which buffers writes in memory (MemTable). Data is automatically flushed to disk when:
-- The MemTable reaches a size threshold.
-- The database object is dropped (program exit).
-
-**Warning:** Ensure your program exits gracefully to guarantee the final flush.
+### 2. MemTable Tuning
+Adjust `max_memtable_size_mb` in `browserdb.toml` to balance memory usage and disk I/O. Larger memtables reduce flush frequency but increase memory consumption.
 
 ---
 
 ## 🚨 Error Handling
 
-All operations return a standard `Result`.
+Most operations return `Result<T, Box<dyn std::error::Error>>`. Always handle errors to prevent data inconsistency.
 
 ```rust
-match db.history().insert(&entry) {
-    Ok(_) => println!("Saved!"),
-    Err(e) => eprintln!("Database error: {}", e),
+if let Err(e) = db.history().insert(&entry) {
+    eprintln!("Failed to save history: {}", e);
 }
 ```
-
-Common errors:
-- **IO Errors:** Disk full, permission denied.
-- **Serialization Errors:** Failed to encode/decode entry.
 
 ---
 
 ## ✅ Best Practices
 
-1. **Key Management:** For `localstore` and `settings`, use consistent key naming (e.g., `app:window:width`).
-2. **Thread Safety:** `BrowserDB` is thread-safe. Wrap it in `Arc<BrowserDB>` to share across threads.
+1. **Graceful Exit**: BrowserDB attempts to flush the MemTable on drop. Ensure your application shuts down cleanly to guarantee data persistence.
+2. **Key Hashing**: Use consistent hashing for URLs and domains to ensure efficient lookups in history and cookie tables.
+3. **Directory Permissions**: Ensure the application has read/write access to the database directory.
 
 ---
 

@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const MAGIC_BYTES: &[u8; 9] = b"BROWSERDB";
 pub const BDB_VERSION: u8 = 1;
 pub const BDB_HEADER_SIZE: usize = 47;
-pub const BDB_FOOTER_SIZE: usize = 52;
+pub const BDB_FOOTER_SIZE: usize = 60;
+pub const BDB_BLOCK_SIZE: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -39,6 +40,7 @@ pub enum EntryType {
     Delete = 3,
     BatchStart = 4,
     BatchEnd = 5,
+    BlobIndex = 6,
 }
 
 impl From<u8> for EntryType {
@@ -49,6 +51,7 @@ impl From<u8> for EntryType {
             3 => EntryType::Delete,
             4 => EntryType::BatchStart,
             5 => EntryType::BatchEnd,
+            6 => EntryType::BlobIndex,
             _ => EntryType::Insert,
         }
     }
@@ -285,6 +288,7 @@ pub struct BDBFileFooter {
     pub entry_count: u64,
     pub file_size: u64,
     pub data_offset: u64,
+    pub block_crc_offset: u64,
     pub max_entry_size: u32,
     pub total_key_size: u64,
     pub total_value_size: u64,
@@ -299,6 +303,7 @@ impl BDBFileFooter {
             entry_count: 0,
             file_size: 0,
             data_offset: 0,
+            block_crc_offset: 0,
             max_entry_size: 0,
             total_key_size: 0,
             total_value_size: 0,
@@ -312,6 +317,7 @@ impl BDBFileFooter {
         writer.write_u64::<LittleEndian>(self.entry_count)?;
         writer.write_u64::<LittleEndian>(self.file_size)?;
         writer.write_u64::<LittleEndian>(self.data_offset)?;
+        writer.write_u64::<LittleEndian>(self.block_crc_offset)?;
         writer.write_u32::<LittleEndian>(self.max_entry_size)?;
         writer.write_u64::<LittleEndian>(self.total_key_size)?;
         writer.write_u64::<LittleEndian>(self.total_value_size)?;
@@ -325,6 +331,7 @@ impl BDBFileFooter {
         let entry_count = reader.read_u64::<LittleEndian>()?;
         let file_size = reader.read_u64::<LittleEndian>()?;
         let data_offset = reader.read_u64::<LittleEndian>()?;
+        let block_crc_offset = reader.read_u64::<LittleEndian>()?;
         let max_entry_size = reader.read_u32::<LittleEndian>()?;
         let total_key_size = reader.read_u64::<LittleEndian>()?;
         let total_value_size = reader.read_u64::<LittleEndian>()?;
@@ -339,6 +346,7 @@ impl BDBFileFooter {
             entry_count,
             file_size,
             data_offset,
+            block_crc_offset,
             max_entry_size,
             total_key_size,
             total_value_size,

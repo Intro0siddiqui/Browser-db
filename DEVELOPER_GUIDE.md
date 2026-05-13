@@ -6,10 +6,11 @@ Architecture, implementation details, and guidelines for contributors.
 
 1. [Architecture Overview](#architecture-overview)
 2. [Core Components](#core-components)
-3. [Development Setup](#development-setup)
-4. [Contribution Guidelines](#contribution-guidelines)
-5. [Performance Engineering](#performance-engineering)
-6. [Testing Strategy](#testing-strategy)
+3. [Internal Subsystems](#internal-subsystems)
+4. [Development Setup](#development-setup)
+5. [Contribution Guidelines](#contribution-guidelines)
+6. [Performance Engineering](#performance-engineering)
+7. [Testing Strategy](#testing-strategy)
 
 ---
 
@@ -17,93 +18,77 @@ Architecture, implementation details, and guidelines for contributors.
 
 ### System Design Philosophy
 
-BrowserDB follows these core principles:
+BrowserDB is a Pure Rust LSM-tree hybrid engine designed for browser-native performance:
 
-1. **Performance First**: Sub-millisecond queries (700k+ ops/sec) for hot data
-2. **Memory Efficient**: <50MB footprint with intelligent caching
-3. **Reliability**: ACID compliance with corruption recovery
-4. **Simplicity**: Clear Pure Rust interfaces
-5. **Simplicity**: No complex SQL parser overhead
+1. **Performance First**: 900k+ reads/sec and 390k+ writes/sec via sharded locking.
+2. **Crash Consistency**: WAL-backed operations with group commits.
+3. **Multi-Mode**: Seamless switching between Persistent (LSM) and Ultra (In-memory) modes.
+4. **Intelligent Indexing**: HeatTracker-driven compaction and access optimization.
 
 ### High-Level Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Application Layer                        │
-│                 (Rust Crate / FFI / WASM)                       │
+│                (Rust Crate / C-FFI / WASM Support)              │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────┴───────────────────────────────────┐
 │                       Pure Rust Engine                          │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │  BrowserDB   │  │  HeatMap     │  │   Modes &    │          │
-│  │ Coordinator  │  │   Cache      │  │  Operations  │          │
+│  │  BrowserDB   │  │  HeatTracker │  │   Mode       │          │
+│  │ Coordinator  │  │  (Sharded)   │  │   Switcher   │          │
 │  └──────────────┘  └──────────────┘  └──────────────┘          │
 │         │                    │                    │           │
 │  ┌──────┴──────────────┐     │                    │           │
-│  │     LSM-Tree        │     │                    │           │
-│  │     Storage         │     │                    │           │
-│  └─────────────────────┘     │                    │           │
+│  │     LSM-Tree        │◄────┘                    │           │
+│  │ (10 Levels + WAL)   │                          │           │
+│  └──────────┬──────────┘                          │           │
+│             │                │                    │           │
+│  ┌──────────▼──────────┐     │                                │
+│  │   Blob Storage      │     │                                │
+│  │  (Large Objects)    │     │                                │
+│  └─────────────────────┘     │                                │
 │                              │                                │
 │  ┌───────────────────────────┼────────────────────────────────┤
 │  │                    File System                             │
 │  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐      │
-│  │  │  .bdb Files  │ │  SSTables    │ │   Format     │      │
-│  │  │  (Universal) │ │  (Storage)   │ │ (Serialization)│    │
+│  │  │  .wal Files  │ │  .sst Files  │ │  .blob Files │      │
+│  │  │ (Group Commit)│ │ (Mmap Read)  │ │ (Direct I/O) │      │
 │  │  └──────────────┘ └──────────────┘ └──────────────┘      │
 │  └───────────────────────────────────────────────────────────┘
 └─────────────────────────────────────────────────────────────────┘
-```
-
-### Data Flow
-
-```
-Write Operation:
-App → BrowserDB → LSM-Tree → MemTable (BTreeMap) → (Flush) → SSTable
-
-Read Operation:  
-App → BrowserDB → HeatMap Cache → (Miss) → LSM-Tree → SSTables
 ```
 
 ---
 
 ## 🔧 Core Components
 
-### 1. BrowserDB Coordinator (`lib.rs`)
+### 1. Sharded MemTable
+To minimize lock contention, the MemTable is sharded into 16 independent `BTreeMap` shards, each protected by its own `RwLock`. Keys are routed to shards via hash-based distribution.
 
-**Purpose**: Central orchestrator managing all subsystems
+### 2. LSM-Tree & Compaction
+- **10 Levels**: Support for leveled storage (Level 0 to Level 9).
+- **Background Compaction**: Triggered when Level 0 reaches `max_level0_files` (default: 4).
+- **Heat-Aware**: The HeatTracker influences compaction priority, ensuring hot data is optimized first.
 
-**Key Responsibilities**:
-- Database lifecycle management
-- Table accessors (History, Cookies, etc.)
-- Mode switching
+### 3. WAL Manager (Group Commit)
+The Write-Ahead Log uses a background thread to perform "Group Commits" every 5ms or when the 32KB buffer is full, significantly reducing I/O latency for high-frequency writes.
 
-**Purpose**: High-performance storage with optimal write/read balance
+### 4. HeatTracker
+A sharded access monitoring system that tracks "heat" (access frequency) for keys. It uses a decay mechanism to ensure that only currently relevant data is considered "hot".
 
-**Architecture Overview**:
-- **MemTable**: In-memory `BTreeMap` for O(log N) writes.
-- **SSTable**: Disk-based sorted files with sparse indexing and Bloom Filters.
+---
 
-**Compaction Strategies**:
-- **Leveled Compaction**: Merges older SSTables to keep read paths efficient.
+## 📦 Internal Subsystems
 
-### 3. HeatMap Cache (`heatmap.rs`)
+### Blob Storage (`blob_log.rs`)
+To prevent LSM-tree bloat, values larger than 64KB are automatically redirected to the Blob Storage. The LSM-tree stores a small `BlobPointer` instead of the actual data, keeping SSTables compact and efficient for scanning.
 
-**Purpose**: Intelligent caching system achieving 95%+ hit rates
+### C/FFI Layer (`ffi.rs`)
+BrowserDB exports a stable C-compatible API, allowing it to be used from C, C++, Python, or Node.js. It handles string conversions and memory management across the FFI boundary safely.
 
-**Features**:
-- **Bloom Filters**: Probabilistic data structure to quickly test if an SSTable contains a key.
-- **Hot Data Tracking**: Monitors access frequency to prioritize keeping data in memory.
-
-### 4. File Format (`format.rs`)
-
-**Purpose**: Universal .bdb file format with integrity guarantees
-
-**File Format Specification**:
-- **Header**: Magic bytes, version, timestamp.
-- **Entries**: Type, Key Len (Varint), Key, Value Len (Varint), Value, Timestamp, CRC32.
-- **Footer**: Summary stats and file checksum.
-
+---
 
 ## 🛠️ Development Setup
 
@@ -138,17 +123,16 @@ cargo run --release --example stress_test
 
 ### Code Style
 
-**Rust Coding Standards**:
 - Use `rustfmt` for formatting.
 - Use `clippy` for linting.
-- Document public APIs with rustdoc comments (`///`).
+- Ensure all public structures are Serializable/Deserializable via `serde`.
 
 ### Pull Request Process
 
 1. **Fork and Branch**: Create feature branch from `main`
 2. **Implement**: Follow coding standards and add tests
-3. **Test**: Run `cargo test` locally
-4. **Submit**: Create pull request with clear description
+3. **Verify**: Run `cargo test` and `cargo run --example stress_test`
+4. **Submit**: Create pull request
 
 ---
 
@@ -156,30 +140,21 @@ cargo run --release --example stress_test
 
 ### Performance Targets
 
-| Metric | Target | Measurement |
-|--------|--------|-------------|
-| **Read Throughput** | 800K+ ops/sec | `stress_test.rs` |
-| **Write Throughput** | 700K+ ops/sec | `stress_test.rs` |
-| **Query Latency (P99)** | <0.1ms | Real-time monitoring |
-
-### Benchmarking
-
-```bash
-cd bindings
-cargo run --release --example stress_test
-```
+| Metric | Measured (Release) |
+|--------|--------|
+| **Read Throughput** | 900K+ ops/sec |
+| **Write Throughput** | 390K+ ops/sec |
+| **Random Query Latency** | < 1µs |
 
 ---
 
 ## 🧪 Testing Strategy
 
-### Unit Testing
-
-Run unit tests for individual modules:
+### Stress Testing
+Use the provided `stress_test` example to verify performance and WAL recovery:
 ```bash
-cargo test
+cargo run --release --example stress_test
 ```
-
 
 ---
 
