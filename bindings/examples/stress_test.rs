@@ -109,13 +109,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     db2.history().insert(&entry)?;
 
     println!("   Simulating abrupt process exit (not calling drop)...");
+    // Wait for WAL flush thread
+    std::thread::sleep(std::time::Duration::from_millis(100));
     // We can't really "exit" here easily without stopping the test,
     // but we can bypass drop by using std::mem::forget or just opening a new handle
     // to the same path after manually loading the WAL.
     std::mem::forget(db2);
 
     println!("   Re-opening database to check WAL recovery...");
-    let db3 = BrowserDB::open(db_path)?;
+    let db3 = BrowserDB::open_without_locking(db_path)?;
     if let Some(recovered) = db3.history().get(crash_id as u128)? {
         println!("   ✅ Successfully recovered record '{}' from WAL!", recovered.title);
     } else {

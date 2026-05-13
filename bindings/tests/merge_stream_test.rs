@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Write, Seek};
 use tempfile::tempdir;
 use browserdb::core::lsm_tree::{LSMTree, MemTable, SSTable};
 use browserdb::core::format::{EntryType, TableType, BDBLogEntry};
@@ -22,11 +22,13 @@ fn test_merge_stream_corrupt_sst() -> io::Result<()> {
     lsm_tree.put(b"key2".to_vec(), b"val2".to_vec())?;
     lsm_tree.flush()?; // Create SSTable 2
 
-    // Corrupt the first SSTable
+    // Corrupt the first SSTable's data area (starts at 47)
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         if entry.path().extension().and_then(|s| s.to_str()) == Some("sst") {
             let mut file = OpenOptions::new().write(true).open(entry.path())?;
+            file.set_len(100)?; // Truncate or mess up the file
+            file.seek(std::io::SeekFrom::Start(50))?;
             file.write_all(b"garbage data to break read")?;
             break; // Corrupt just one
         }

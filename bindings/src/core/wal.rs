@@ -29,15 +29,12 @@ impl WALManager {
         let stop_signal_clone = Arc::clone(&stop_signal);
 
         let flush_thread = thread::spawn(move || {
-            let mut last_flush = Instant::now();
             while !stop_signal_clone.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(5));
-                if last_flush.elapsed() >= Duration::from_millis(5) {
+                {
                     let mut w = writer_clone.lock().unwrap();
                     let _ = w.flush();
-                    if w.get_ref().sync_all().is_ok() {
-                        last_flush = Instant::now();
-                    }
+                    let _ = w.get_ref().sync_all();
                 }
             }
             // Final flush

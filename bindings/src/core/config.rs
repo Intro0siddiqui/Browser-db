@@ -1,12 +1,12 @@
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
-use std::io;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct LsmTreeConfig {
     pub max_level0_files: usize,
     pub max_memtable_size_mb: usize,
+    pub level_size_thresholds_mb: Vec<usize>,
 }
 
 impl Default for LsmTreeConfig {
@@ -14,6 +14,7 @@ impl Default for LsmTreeConfig {
         Self {
             max_level0_files: 4,
             max_memtable_size_mb: 20,
+            level_size_thresholds_mb: vec![10, 100, 1000, 10000, 100000, 1000000],
         }
     }
 }
