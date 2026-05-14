@@ -11,7 +11,7 @@ use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use crate::core::format::{BDBLogEntry, EntryType, TableType, BDBFileHeader, BDBFileFooter, BDB_HEADER_SIZE, BDB_FOOTER_SIZE, BDB_BLOCK_SIZE};
 use crate::core::heatmap::{BloomFilter, HeatTracker, QueryType};
 use crate::core::wal::WALManager;
-use crate::core::blob_log::{BlobLog, BlobPointer};
+use crate::core::blob_log::{BlobLog, BlobPointer, BlobLogIterator};
 
 #[derive(Debug, Clone)]
 pub struct KVEntry {
@@ -535,7 +535,7 @@ impl LSMTree {
     
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> io::Result<()> {
         let (entry_type, stored_value) = if value.len() > 64 * 1024 {
-            let ptr = self.inner.blob_log.put(&value)?;
+            let ptr = self.inner.blob_log.put(&key, &value)?;
             (EntryType::BlobIndex, ptr.encode())
         } else {
             (EntryType::Insert, value)
@@ -602,46 +602,19 @@ impl LSMTree {
     pub fn get(&self, key: &[u8]) -> Option<KVEntry> {
         self.inner.heat_tracker.record_access(key, QueryType::Read);
 
-        // 1. MemTable
-        let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
-        let entry_opt = self.inner.memtable[shard].read().get(key);
+        let mut entry = self.inner.get_raw(key)?;
+        if entry.deleted {
+            return None;
+        }
 
-        if let Some(mut entry) = entry_opt {
-            if entry.deleted {
-                return None;
-            }
-            if entry.entry_type == EntryType::BlobIndex {
-                if let Some(ptr) = BlobPointer::decode(&entry.value) {
-                    if let Ok(val) = self.inner.blob_log.get(&ptr) {
-                        entry.value = val;
-                    }
-                }
-            }
-            return Some(entry);
-        }
-        
-        // 2. Levels (0 to 9)
-        for level in &self.inner.levels {
-            let sstables = level.read();
-            // Search newest SSTables first (usually end of list)
-            for sstable in sstables.iter().rev() {
-                if let Some(mut entry) = sstable.get(key) {
-                    if entry.deleted {
-                        return None;
-                    }
-                    if entry.entry_type == EntryType::BlobIndex {
-                        if let Some(ptr) = BlobPointer::decode(&entry.value) {
-                            if let Ok(val) = self.inner.blob_log.get(&ptr) {
-                                entry.value = val;
-                            }
-                        }
-                    }
-                    return Some(entry);
+        if entry.entry_type == EntryType::BlobIndex {
+            if let Some(ptr) = BlobPointer::decode(&entry.value) {
+                if let Ok(val) = self.inner.blob_log.get(&ptr) {
+                    entry.value = val;
                 }
             }
         }
-        
-        None
+        Some(entry)
     }
 
     pub fn delete(&self, key: Vec<u8>) -> io::Result<()> {
@@ -682,8 +655,17 @@ impl LSMTree {
 
             for (key, entry) in range {
                 if !prefix.is_empty() && !key.starts_with(prefix) { break; }
-                if !entry.deleted && predicate(entry) {
-                    results.insert(key.clone(), Some(entry.clone()));
+                let mut deref_entry = entry.clone();
+                if deref_entry.entry_type == EntryType::BlobIndex && !deref_entry.deleted {
+                    if let Some(ptr) = BlobPointer::decode(&deref_entry.value) {
+                        if let Ok(val) = self.inner.blob_log.get(&ptr) {
+                            deref_entry.value = val;
+                        }
+                    }
+                }
+
+                if !deref_entry.deleted && predicate(&deref_entry) {
+                    results.insert(key.clone(), Some(deref_entry));
                 } else {
                     results.insert(key.clone(), None);
                 }
@@ -707,7 +689,15 @@ impl LSMTree {
                     if !prefix.is_empty() && !idx.key.starts_with(prefix) { break; }
                     if !results.contains_key(&idx.key) {
                         // Directly read from mmap
-                        if let Some(kv) = sstable.get_at_index(idx) {
+                        if let Some(mut kv) = sstable.get_at_index(idx) {
+                            if kv.entry_type == EntryType::BlobIndex && !kv.deleted {
+                                if let Some(ptr) = BlobPointer::decode(&kv.value) {
+                                    if let Ok(val) = self.inner.blob_log.get(&ptr) {
+                                        kv.value = val;
+                                    }
+                                }
+                            }
+
                             if !kv.deleted && predicate(&kv) {
                                 results.insert(idx.key.clone(), Some(kv));
                             } else {
@@ -755,6 +745,10 @@ impl LSMTree {
 
     pub fn merge_sstables(&self, level: u8, tables: Vec<Arc<SSTable>>) -> io::Result<Arc<SSTable>> {
         self.inner.merge_sstables(level, tables)
+    }
+
+    pub fn run_blob_gc(&self) -> io::Result<()> {
+        self.inner.run_blob_gc()
     }
 }
 
@@ -844,6 +838,110 @@ impl LSMTreeInner {
                 }
             }
         }
+    }
+
+    pub fn run_blob_gc(&self) -> io::Result<()> {
+        let blob_path = self.blob_log.get_path();
+        let gc_path = blob_path.with_extension("blob.gc.tmp");
+
+        let mut new_blob_log_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&gc_path)?;
+
+        let mut new_pointers = Vec::new();
+        let iter = BlobLogIterator::new(&blob_path)?;
+
+        let mut current_new_offset = 0u64;
+
+        for entry_res in iter {
+            let (old_offset, _old_size, key, value) = entry_res?;
+
+            // Check if this blob is still alive in LSM-tree
+            let is_alive = if let Some(kv) = self.get_raw(&key) {
+                if kv.entry_type == EntryType::BlobIndex {
+                    if let Some(ptr) = BlobPointer::decode(&kv.value) {
+                        ptr.offset == old_offset
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if is_alive {
+                // Write to new log
+                let mut log_entry = BDBLogEntry::new(EntryType::BlobIndex, key.clone(), value);
+                let written = log_entry.write(&mut new_blob_log_file)?;
+
+                new_pointers.push((key, BlobPointer {
+                    offset: current_new_offset,
+                    size: written as u32,
+                }));
+
+                current_new_offset += written as u64;
+            }
+        }
+
+        new_blob_log_file.sync_all()?;
+
+        // Atomic update in LSM-tree
+        if !new_pointers.is_empty() {
+            let mut batch = Batch::new();
+            for (key, ptr) in new_pointers {
+                batch.put(key, ptr.encode());
+            }
+
+            self.apply_batch_direct(batch, EntryType::BlobIndex)?;
+        }
+
+        // Swap files
+        self.blob_log.swap_file(&gc_path)?;
+
+        Ok(())
+    }
+
+    fn get_raw(&self, key: &[u8]) -> Option<KVEntry> {
+        // 1. MemTable
+        let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
+        let entry_opt = self.memtable[shard].read().get(key);
+
+        if let Some(entry) = entry_opt {
+            return Some(entry);
+        }
+
+        // 2. Levels (0 to 9)
+        for level in &self.levels {
+            let sstables = level.read();
+            for sstable in sstables.iter().rev() {
+                if let Some(entry) = sstable.get(key) {
+                    return Some(entry);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn apply_batch_direct(&self, batch: Batch, entry_type: EntryType) -> io::Result<()> {
+        let mut wal = self.wal.write();
+        wal.log(&mut BDBLogEntry::new(EntryType::BatchStart, Vec::new(), Vec::new()))?;
+        for (k, v, _t) in &batch.entries {
+            wal.log(&mut BDBLogEntry::new(entry_type, k.clone(), v.clone()))?;
+        }
+        wal.log(&mut BDBLogEntry::new(EntryType::BatchEnd, Vec::new(), Vec::new()))?;
+        drop(wal);
+
+        for (k, v, _t) in batch.entries {
+            let shard = (k.first().cloned().unwrap_or(0) % 16) as usize;
+            let mut mem = self.memtable[shard].write();
+            mem.put(k, v, entry_type);
+        }
+        Ok(())
     }
 
     pub fn merge_sstables(&self, level: u8, tables: Vec<Arc<SSTable>>) -> io::Result<Arc<SSTable>> {
