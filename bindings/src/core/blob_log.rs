@@ -1,7 +1,8 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write, Seek, SeekFrom};
+use std::io::{self, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use crate::core::format::{BDBLogEntry, EntryType};
 
 pub struct BlobPointer {
     pub offset: u64,
@@ -42,21 +43,94 @@ impl BlobLog {
         })
     }
 
-    pub fn put(&self, value: &[u8]) -> io::Result<BlobPointer> {
+    pub fn put(&self, key: &[u8], value: &[u8]) -> io::Result<BlobPointer> {
         let mut file = self.file.lock().unwrap();
         let offset = file.seek(SeekFrom::End(0))?;
-        file.write_all(value)?;
+
+        let mut entry = BDBLogEntry::new(EntryType::BlobIndex, key.to_vec(), value.to_vec());
+        let size = entry.write(&mut *file)?;
+
         Ok(BlobPointer {
             offset,
-            size: value.len() as u32,
+            size: size as u32,
         })
     }
 
     pub fn get(&self, ptr: &BlobPointer) -> io::Result<Vec<u8>> {
         let mut file = self.file.lock().unwrap();
-        let mut buf = vec![0u8; ptr.size as usize];
         file.seek(SeekFrom::Start(ptr.offset))?;
-        file.read_exact(&mut buf)?;
-        Ok(buf)
+        let entry = BDBLogEntry::read(&mut *file)?;
+        Ok(entry.value)
+    }
+
+    pub fn get_path(&self) -> PathBuf {
+        self.path.clone()
+    }
+
+    pub fn swap_file(&self, new_path: &Path) -> io::Result<()> {
+        let mut file = self.file.lock().unwrap();
+        // Close current file by dropping it
+        *file = File::open("/dev/null")?; // Temporary dummy
+
+        std::fs::rename(new_path, &self.path)?;
+
+        let new_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&self.path)?;
+
+        *file = new_file;
+        Ok(())
+    }
+}
+
+pub struct BlobLogIterator {
+    file: File,
+    offset: u64,
+    file_size: u64,
+}
+
+impl BlobLogIterator {
+    pub fn new(path: &Path) -> io::Result<Self> {
+        let mut file = File::open(path)?;
+        let file_size = file.seek(SeekFrom::End(0))?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(Self {
+            file,
+            offset: 0,
+            file_size,
+        })
+    }
+}
+
+impl Iterator for BlobLogIterator {
+    type Item = io::Result<(u64, u32, Vec<u8>, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset >= self.file_size {
+            return None;
+        }
+
+        let current_offset = self.offset;
+        match BDBLogEntry::read(&mut self.file) {
+            Ok(entry) => {
+                match self.file.seek(SeekFrom::Current(0)) {
+                    Ok(new_offset) => {
+                        let size = (new_offset - current_offset) as u32;
+                        self.offset = new_offset;
+                        Some(Ok((current_offset, size, entry.key, entry.value)))
+                    }
+                    Err(e) => Some(Err(e)),
+                }
+            }
+            Err(e) => {
+                if self.offset < self.file_size {
+                    Some(Err(e))
+                } else {
+                    None
+                }
+            }
+        }
     }
 }
