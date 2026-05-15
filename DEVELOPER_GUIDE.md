@@ -76,7 +76,7 @@ To minimize lock contention, the MemTable is sharded into 16 independent `BTreeM
 The Write-Ahead Log uses a background thread to perform "Group Commits" every 5ms or when the 32KB buffer is full, significantly reducing I/O latency for high-frequency writes.
 
 ### 4. HeatTracker
-A sharded access monitoring system that tracks "heat" (access frequency) for keys. It uses a decay mechanism to ensure that only currently relevant data is considered "hot".
+A sharded access monitoring system that tracks "heat" (access frequency) for keys. It uses 32 independent shards to minimize lock contention and a decay mechanism to ensure that only currently relevant data is considered "hot".
 
 ---
 

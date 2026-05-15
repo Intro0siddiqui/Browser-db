@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "High-performance pure Rust browser database"
 authors = ["BrowserDB Team"]
-license = "BSD-3-Clause"
+license = "AGPL-3.0-only"
 
 [lib]
 name = "browserdb"

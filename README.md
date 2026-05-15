@@ -7,7 +7,7 @@ BrowserDB is a high-performance, browser-native database designed as a modern al
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![Performance](https://img.shields.io/badge/performance-890K%2B%20reads%2Fsec-blue)]()
 [![Memory Usage](https://img.shields.io/badge/memory-%3C50MB-orange)]()
-[![License](https://img.shields.io/badge/license-BSD--3--Clause-yellow)]()
+[![License](https://img.shields.io/badge/license-AGPL--3.0-orange)]()
 
 ## ⚡ Quick Start
 
@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Store some data
     db.history().insert(&HistoryEntry {
         timestamp: 1234567890,
+        url: "https://example.com".to_string(),
         url_hash: 123,
         title: "My First Page".to_string(),
         visit_count: 1
@@ -108,6 +109,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 🏃‍♂️ Performance Benchmarks
 
+For comprehensive runtime benchmarks, visit: [browserdb-runtime-bench](https://github.com/Intro0siddiqui/browserdb-runtime-bench)
+
 ```bash
 # Run performance stress test
 cd bindings
@@ -135,7 +138,11 @@ browserdb/
 │   ├── examples/            # 💡 Usage examples
 │   └── Cargo.toml           # Rust configuration
 ├── 📁 scripts/               # 🛠️ Utility scripts
-└── 📁 docs/                  # 📚 Documentation
+├── 📄 API_REFERENCE.md       # 🔧 API documentation
+├── 📄 DEVELOPER_GUIDE.md     # 🛠️ Architecture & internal details
+├── 📄 USER_MANUAL.md         # 👤 User guide
+├── 📄 QUICK_START.md         # 🚀 5-minute setup
+└── 📄 FILE_STRUCTURE.md      # 📁 Codebase organization
 ```
 
 ## 🎯 Use Cases
@@ -183,7 +190,7 @@ browserdb/
 
 ## 📄 License
 
-**BSD-3-Clause** - Open standard for universal browser adoption
+**GNU Affero General Public License v3.0 (AGPL-3.0)** - Ensuring cooperation with the community for the modern web.
 
 ## 🤝 Community
 
