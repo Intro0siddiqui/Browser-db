@@ -28,6 +28,12 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>>
 
 Opens an existing database or creates a new one at the specified directory path.
 
+```rust
+pub fn open_without_locking<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>>
+```
+
+Opens the database without acquiring an exclusive process lock.
+
 **Examples:**
 ```rust
 let db = BrowserDB::open("my_database")?;
@@ -138,6 +144,7 @@ pub struct BrowserDBConfig {
 pub struct LsmTreeConfig {
     pub max_level0_files: usize,    // Default: 4
     pub max_memtable_size_mb: usize, // Default: 20
+    pub level_size_thresholds_mb: Vec<usize>, // Default: [10, 100, 1000...]
 }
 
 pub struct HeatmapConfig {

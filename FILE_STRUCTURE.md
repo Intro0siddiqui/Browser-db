@@ -68,14 +68,18 @@ pub struct SSTable {
 **File Format Structure:**
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Header (Magic, Version, Timestamp)                         │
+│ Header (47 bytes: Magic, Version, TableType, etc.)         │
 ├─────────────────────────────────────────────────────────────┤
-│ Entry Data Stream                                          │
-│ ├── Type (1 byte)                                          │
+│ Data Blocks (4096 bytes each, CRC32 protected)             │
+│ ├── Entry Type (1 byte)                                    │
 │ ├── Key Length (Varint) + Key Data                         │
 │ ├── Value Length (Varint) + Value Data                     │
 │ ├── Timestamp (8 bytes)                                    │
-│ └── CRC32 (4 bytes)                                        │
+│ └── Entry CRC32 (4 bytes)                                  │
+├─────────────────────────────────────────────────────────────┤
+│ Block Checksums (4 bytes per block)                        │
+├─────────────────────────────────────────────────────────────┤
+│ Footer (60 bytes: Metadata, Offsets, File CRC)             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -117,7 +121,7 @@ pub struct SSTable {
 **Purpose:** User and developer documentation
 
 ```
-docs/
+.
 ├── USER_MANUAL.md                 # Complete user guide  
 ├── DEVELOPER_GUIDE.md             # Architecture and development
 ├── FILE_STRUCTURE.md              # This file
