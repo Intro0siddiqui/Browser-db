@@ -592,7 +592,16 @@ impl LSMTree {
 
         for mut level in levels {
             for sstable in level.drain(..) {
-                let _ = fs::remove_file(&sstable.file_path);
+                #[cfg(target_os = "windows")]
+                {
+                    let path = sstable.file_path.clone();
+                    drop(sstable);
+                    let _ = fs::remove_file(&path);
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = fs::remove_file(&sstable.file_path);
+                }
             }
         }
 
@@ -1013,7 +1022,16 @@ impl LSMTreeInner {
 
         // Delete old sstables
         for table in tables {
-            let _ = fs::remove_file(&table.file_path);
+            #[cfg(target_os = "windows")]
+            {
+                let path = table.file_path.clone();
+                drop(table);
+                let _ = fs::remove_file(&path);
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = fs::remove_file(&table.file_path);
+            }
         }
 
         Ok(new_sstable)
