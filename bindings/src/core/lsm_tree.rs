@@ -592,7 +592,16 @@ impl LSMTree {
 
         for mut level in levels {
             for sstable in level.drain(..) {
-                let _ = fs::remove_file(&sstable.file_path);
+                #[cfg(target_os = "windows")]
+                {
+                    let path = sstable.file_path.clone();
+                    drop(sstable);
+                    let _ = fs::remove_file(&path);
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = fs::remove_file(&sstable.file_path);
+                }
             }
         }
 
@@ -817,6 +826,15 @@ impl LSMTreeInner {
                 next_lvl.push(new_sst);
             }
 
+            // Drop local references before removing files
+            let paths_to_remove: Vec<_> = tables_to_compact.iter().map(|t| t.file_path.clone()).collect();
+            drop(tables_to_compact);
+            for path in paths_to_remove {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!("Failed to remove SSTable file {}: {}", path.display(), e);
+                }
+            }
+
             // Cascade to next level if threshold exceeded
             if next_level < 9 {
                 let (should_compact_next, tables_next) = {
@@ -1011,10 +1029,9 @@ impl LSMTreeInner {
 
         let new_sstable = Arc::new(SSTable::create(level, &merged_entries, &self.base_path, self.table_type)?);
 
-        // Delete old sstables
-        for table in tables {
-            let _ = fs::remove_file(&table.file_path);
-        }
+        // Note: SSTable file removal is now handled in `run_compaction_cascade`
+        // after removing the table entries from `self.levels` to prevent locking
+        // and race conditions, especially on Windows.
 
         Ok(new_sstable)
     }
