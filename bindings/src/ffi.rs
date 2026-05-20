@@ -81,7 +81,7 @@ pub extern "C" fn browserdb_free_string(s: *mut c_char) {
     }
 }
 
-fn calculate_hash(s: &str) -> u128 {
+pub(crate) fn calculate_hash(s: &str) -> u128 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut s1 = DefaultHasher::new();
