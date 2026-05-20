@@ -2,7 +2,6 @@
 
 use browserdb::*;
 use tempfile::tempdir;
-use std::time::Duration;
 
 #[tokio::test]
 async fn test_database_creation_and_basic_operations() {

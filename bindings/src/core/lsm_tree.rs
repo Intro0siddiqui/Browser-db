@@ -3,12 +3,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BinaryHeap};
+use std::cmp::Ordering;
 use parking_lot::RwLock;
 use memmap2::Mmap;
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 
-use crate::core::format::{BDBLogEntry, EntryType, TableType, BDBFileHeader, BDBFileFooter, BDB_HEADER_SIZE, BDB_FOOTER_SIZE, BDB_BLOCK_SIZE};
+use crate::core::format::{BDBLogEntry, EntryType, TableType, BDBFileHeader, BDBFileFooter, BDB_HEADER_SIZE, BDB_FOOTER_SIZE, BDB_BLOCK_SIZE, BDB_RESTART_INTERVAL};
 use crate::core::heatmap::{BloomFilter, HeatTracker, QueryType};
 use crate::core::wal::WALManager;
 use crate::core::blob_log::{BlobLog, BlobPointer, BlobLogIterator};
@@ -102,6 +103,7 @@ pub struct SSTableIterator<'a> {
     sstable: &'a SSTable,
     offset: usize,
     limit: usize,
+    last_key: Vec<u8>,
 }
 
 impl<'a> Iterator for SSTableIterator<'a> {
@@ -120,10 +122,11 @@ impl<'a> Iterator for SSTableIterator<'a> {
         let data = &self.sstable.mmap[self.offset..self.limit];
         let mut cursor = io::Cursor::new(data);
 
-        match BDBLogEntry::read(&mut cursor) {
+        match read_compressed_entry(&mut cursor, &self.last_key) {
             Ok(log_entry) => {
                 let size = cursor.position() as usize;
                 self.offset += size;
+                self.last_key = log_entry.key.clone();
                 Some(Ok(KVEntry {
                     key: log_entry.key,
                     value: log_entry.value,
@@ -134,6 +137,187 @@ impl<'a> Iterator for SSTableIterator<'a> {
             }
             Err(e) => Some(Err(e)),
         }
+    }
+}
+
+fn write_compressed_entry<W: io::Write>(writer: &mut W, entry: &BDBLogEntry, shared: usize) -> io::Result<usize> {
+    let mut bytes_written = 0;
+
+    writer.write_u8(entry.entry_type as u8)?;
+    bytes_written += 1;
+
+    let non_shared = entry.key.len() - shared;
+    bytes_written += crate::core::format::write_varint(writer, shared as u64)?;
+    bytes_written += crate::core::format::write_varint(writer, non_shared as u64)?;
+    bytes_written += crate::core::format::write_varint(writer, entry.value.len() as u64)?;
+
+    writer.write_all(&entry.key[shared..])?;
+    bytes_written += non_shared;
+
+    writer.write_all(&entry.value)?;
+    bytes_written += entry.value.len();
+
+    writer.write_u64::<LittleEndian>(entry.timestamp)?;
+    bytes_written += 8;
+
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&[entry.entry_type as u8]);
+    hasher.update(&(shared as u64).to_le_bytes());
+    hasher.update(&entry.key[shared..]);
+    hasher.update(&entry.value);
+    hasher.update(&entry.timestamp.to_le_bytes());
+    let crc = hasher.finalize();
+
+    writer.write_u32::<LittleEndian>(crc)?;
+    bytes_written += 4;
+
+    Ok(bytes_written)
+}
+
+fn read_compressed_entry<R: io::Read>(reader: &mut R, full_key: &[u8]) -> io::Result<BDBLogEntry> {
+    let entry_type_res = reader.read_u8();
+    if let Err(ref e) = entry_type_res {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF"));
+        }
+    }
+    let entry_type = entry_type_res?.into();
+    let shared = crate::core::format::read_varint(reader)? as usize;
+    let non_shared = crate::core::format::read_varint(reader)? as usize;
+    let value_len = crate::core::format::read_varint(reader)? as usize;
+
+    let mut key_suffix = vec![0u8; non_shared];
+    reader.read_exact(&mut key_suffix)?;
+
+    let mut key = Vec::with_capacity(shared + non_shared);
+    if shared > 0 {
+        key.extend_from_slice(&full_key[..shared]);
+    }
+    key.extend_from_slice(&key_suffix);
+
+    let mut value = vec![0u8; value_len];
+    reader.read_exact(&mut value)?;
+
+    let timestamp = reader.read_u64::<LittleEndian>()?;
+    let _crc = reader.read_u32::<LittleEndian>()?;
+
+    Ok(BDBLogEntry {
+        entry_type,
+        key,
+        value,
+        timestamp,
+        entry_crc: _crc,
+    })
+}
+
+pub struct SourceIterator<'a> {
+    iter: Box<dyn Iterator<Item = io::Result<KVEntry>> + 'a>,
+    source_id: usize, // used for stable tie-breaking
+}
+
+struct HeapNode<'a> {
+    entry: KVEntry,
+    source_id: usize,
+    iter: Box<dyn Iterator<Item = io::Result<KVEntry>> + 'a>,
+}
+
+impl<'a> PartialEq for HeapNode<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.entry.key == other.entry.key && self.entry.timestamp == other.entry.timestamp
+    }
+}
+
+impl<'a> Eq for HeapNode<'a> {}
+
+impl<'a> PartialOrd for HeapNode<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> Ord for HeapNode<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Min-heap based on key (alphabetical)
+        let mut ord = other.entry.key.cmp(&self.entry.key);
+        if ord == Ordering::Equal {
+            // Newest timestamp first for same key
+            ord = self.entry.timestamp.cmp(&other.entry.timestamp);
+        }
+        if ord == Ordering::Equal {
+            // Source ID as last resort for stability
+            ord = other.source_id.cmp(&self.source_id);
+        }
+        ord
+    }
+}
+
+pub struct MergeIterator<'a> {
+    heap: BinaryHeap<HeapNode<'a>>,
+    last_yielded_key: Option<Vec<u8>>,
+    prefix: Vec<u8>,
+}
+
+impl<'a> MergeIterator<'a> {
+    pub fn new(iters: Vec<SourceIterator<'a>>, prefix: Vec<u8>) -> Self {
+        let mut heap = BinaryHeap::new();
+        for mut src in iters {
+            if let Some(Ok(entry)) = src.iter.next() {
+                heap.push(HeapNode {
+                    entry,
+                    source_id: src.source_id,
+                    iter: src.iter,
+                });
+            }
+        }
+        Self {
+            heap,
+            last_yielded_key: None,
+            prefix,
+        }
+    }
+}
+
+impl<'a> Iterator for MergeIterator<'a> {
+    type Item = io::Result<KVEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(mut node) = self.heap.pop() {
+            let key = node.entry.key.clone();
+
+            // Re-fill heap from the source iterator
+            if let Some(res) = node.iter.next() {
+                match res {
+                    Ok(next_entry) => {
+                        self.heap.push(HeapNode {
+                            entry: next_entry,
+                            source_id: node.source_id,
+                            iter: node.iter,
+                        });
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+
+            // Prefix check
+            if !self.prefix.is_empty() && !key.starts_with(&self.prefix) {
+                continue;
+            }
+
+            // Deduplication and deletion check
+            if let Some(last_key) = &self.last_yielded_key {
+                if *last_key == key {
+                    continue; // Skip older version
+                }
+            }
+
+            self.last_yielded_key = Some(key);
+
+            if !node.entry.deleted {
+                return Some(Ok(node.entry));
+            }
+            // If deleted, we continue loop to find next unique key
+        }
+        None
     }
 }
 
@@ -192,8 +376,11 @@ impl SSTable {
         let mut total_value_size = 0;
         let mut max_entry_size = 0;
         
+        let mut last_key: Vec<u8> = Vec::new();
+        let mut count = 0;
+
         for entry in entries.values() {
-            let mut bdb_entry = BDBLogEntry {
+            let bdb_entry = BDBLogEntry {
                 entry_type: entry.entry_type,
                 key: entry.key.clone(),
                 value: entry.value.clone(),
@@ -201,11 +388,28 @@ impl SSTable {
                 entry_crc: 0,
             };
             
-            let size = bdb_entry.write(&mut file)?;
+            let pos = offset;
+
+            // Prefix Compression Logic
+            let shared = if count % BDB_RESTART_INTERVAL == 0 {
+                0
+            } else {
+                let mut shared = 0;
+                while shared < last_key.len() && shared < entry.key.len() && last_key[shared] == entry.key[shared] {
+                    shared += 1;
+                }
+                shared
+            };
+
+            // For now, we still use BDBLogEntry which writes the full key.
+            // To support true prefix compression in the file, we'd need to modify BDBLogEntry::write.
+            // Let's implement a "Compressed" write path.
+
+            let size = self::write_compressed_entry(&mut file, &bdb_entry, shared)?;
             
             index.push(IndexEntry {
                 key: entry.key.clone(),
-                position: offset,
+                position: pos,
                 size,
                 timestamp: entry.timestamp,
             });
@@ -214,6 +418,8 @@ impl SSTable {
             total_key_size += entry.key.len() as u64;
             total_value_size += entry.value.len() as u64;
             max_entry_size = max_entry_size.max(size as u32);
+            last_key = entry.key.clone();
+            count += 1;
         }
 
         let data_end = offset;
@@ -303,7 +509,13 @@ impl SSTable {
         let data = &self.mmap[start..end];
         let mut cursor = io::Cursor::new(data);
 
-        if let Ok(log_entry) = BDBLogEntry::read(&mut cursor) {
+        // Since we use variable shared length, we need to know the shared length.
+        // But for random access, we must know the shared length.
+        // In our simple implementation, every Nth entry is a restart point (shared=0).
+        // For random access via index, we fortunately stored the full key in IndexEntry,
+        // and we can reconstruct if we read carefully.
+
+        if let Ok(log_entry) = read_compressed_entry(&mut cursor, &index_entry.key) {
             return Some(KVEntry {
                 key: log_entry.key,
                 value: log_entry.value,
@@ -321,6 +533,37 @@ impl SSTable {
             sstable: self,
             offset: BDB_HEADER_SIZE,
             limit,
+            last_key: Vec::new(),
+        }
+    }
+
+    pub fn seek_prefix(&self, prefix: &[u8]) -> SSTableIterator<'_> {
+        let limit = self.mmap.len() - BDB_FOOTER_SIZE - self.block_checksums.len() * 4;
+
+        // Find the first entry that might match the prefix
+        let idx = match self.index.binary_search_by(|i| i.key.as_slice().cmp(prefix)) {
+            Ok(i) => i,
+            Err(i) => i,
+        };
+
+        if idx >= self.index.len() {
+            return SSTableIterator {
+                sstable: self,
+                offset: limit,
+                limit,
+                last_key: Vec::new(),
+            };
+        }
+
+        // To make seek_prefix efficient and correct, we should jump to the nearest RESTART point
+        // BEFORE or AT the target index.
+        let restart_idx = (idx / BDB_RESTART_INTERVAL) * BDB_RESTART_INTERVAL;
+
+        SSTableIterator {
+            sstable: self,
+            offset: self.index[restart_idx].position as usize,
+            limit,
+            last_key: Vec::new(), // Restart point always has shared=0
         }
     }
 
@@ -350,9 +593,10 @@ impl SSTable {
         let mut offset = BDB_HEADER_SIZE;
         let data_end = footer.block_crc_offset as usize;
         
+        let mut last_key = Vec::new();
         while offset < data_end {
             let mut cursor = io::Cursor::new(&mmap[offset..data_end]);
-            match BDBLogEntry::read(&mut cursor) {
+            match read_compressed_entry(&mut cursor, &last_key) {
                 Ok(entry) => {
                     let size = cursor.position() as usize;
                     index.push(IndexEntry {
@@ -361,6 +605,7 @@ impl SSTable {
                         size,
                         timestamp: entry.timestamp,
                     });
+                    last_key = entry.key.clone();
                     offset += size;
                 }
                 Err(_) => break, // Stop on error or EOF
@@ -382,6 +627,11 @@ impl SSTable {
             block_checksums,
         })
     }
+}
+
+pub struct IndexDefinition {
+    pub name: String,
+    pub extractor: Arc<dyn Fn(&[u8], &[u8]) -> Option<Vec<u8>> + Send + Sync>,
 }
 
 pub struct Batch {
@@ -416,10 +666,27 @@ pub struct LSMTreeInner {
     pub blob_log: Arc<BlobLog>,
     pub heat_tracker: HeatTracker,
     pub config: crate::core::config::BrowserDBConfig,
+    pub indices: Vec<IndexDefinitionInternal>,
+}
+
+pub struct IndexDefinitionInternal {
+    pub name: String,
+    pub extractor: Arc<dyn Fn(&[u8], &[u8]) -> Option<Vec<u8>> + Send + Sync>,
+    pub tree: LSMTree,
 }
 
 impl LSMTree {
     pub fn new(base_path: &Path, table_type: TableType, max_memtable_size: usize, config: crate::core::config::BrowserDBConfig) -> io::Result<Self> {
+        Self::new_with_indices(base_path, table_type, max_memtable_size, config, Vec::new())
+    }
+
+    pub fn new_with_indices(
+        base_path: &Path,
+        table_type: TableType,
+        max_memtable_size: usize,
+        config: crate::core::config::BrowserDBConfig,
+        index_defs: Vec<IndexDefinition>
+    ) -> io::Result<Self> {
         let mut levels = Vec::with_capacity(10);
         for _ in 0..10 {
             levels.push(RwLock::new(Vec::new()));
@@ -480,6 +747,28 @@ impl LSMTree {
             }
         }
 
+        // Initialize indices
+        let mut indices = Vec::new();
+        let table_prefix = match table_type {
+            TableType::History => "history",
+            TableType::Cookies => "cookies",
+            TableType::Cache => "cache",
+            TableType::LocalStore => "localstore",
+            TableType::Settings => "settings",
+        };
+        for def in index_defs {
+            let idx_path = base_path.join(format!("{}_idx_{}", table_prefix, def.name));
+            if !idx_path.exists() {
+                fs::create_dir_all(&idx_path)?;
+            }
+            let idx_tree = LSMTree::new(&idx_path, table_type, max_memtable_size / 2, config.clone())?;
+            indices.push(IndexDefinitionInternal {
+                name: def.name,
+                extractor: def.extractor,
+                tree: idx_tree,
+            });
+        }
+
         // Recover existing SSTables
         if let Ok(entries) = fs::read_dir(base_path) {
             let prefix = match table_type {
@@ -529,11 +818,19 @@ impl LSMTree {
                 blob_log,
                 heat_tracker: HeatTracker::new(config.heatmap.max_entries),
                 config,
+                indices,
             })
         })
     }
     
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> io::Result<()> {
+        // Write-Side Indexing
+        for idx in &self.inner.indices {
+            if let Some(idx_key) = (idx.extractor)(&key, &value) {
+                idx.tree.put(idx_key, key.clone())?;
+            }
+        }
+
         let (entry_type, stored_value) = if value.len() > 64 * 1024 {
             let ptr = self.inner.blob_log.put(&key, &value)?;
             (EntryType::BlobIndex, ptr.encode())
@@ -556,6 +853,23 @@ impl LSMTree {
     }
 
     pub fn apply_batch(&self, batch: Batch) -> io::Result<()> {
+        // Write-Side Indexing for Batch
+        for (k, v, t) in &batch.entries {
+            if *t == EntryType::Insert || *t == EntryType::Update {
+                for idx in &self.inner.indices {
+                    if let Some(idx_key) = (idx.extractor)(k, v) {
+                        idx.tree.put(idx_key, k.clone())?;
+                    }
+                }
+            } else if *t == EntryType::Delete {
+                // If we delete a record, we should ideally delete the index entry too.
+                // However, without the old value, we can't know the index key.
+                // For now, BrowserDB indices will be "lazy-cleaned" or require manual management
+                // if they are not purely based on the key.
+                // But for pure "Write-Side Indexing" as requested, we handle inserts.
+            }
+        }
+
         let mut wal = self.inner.wal.write();
         wal.log(&mut BDBLogEntry::new(EntryType::BatchStart, Vec::new(), Vec::new()))?;
         for (k, v, t) in &batch.entries {
@@ -581,6 +895,10 @@ impl LSMTree {
     }
 
     pub fn clear(&self) -> io::Result<()> {
+        for idx in &self.inner.indices {
+            idx.tree.clear()?;
+        }
+
         for shard in &self.inner.memtable {
             shard.write().clear();
         }
@@ -647,6 +965,50 @@ impl LSMTree {
 
     pub fn scan_prefix(&self, prefix: &[u8]) -> Vec<KVEntry> {
         self.scan_with_predicate(prefix, |_| true)
+    }
+
+    pub fn streaming_iter<'a>(&'a self, prefix: &'a [u8]) -> MergeIterator<'a> {
+        let mut iters = Vec::new();
+
+        // 1. MemTable Iterators
+        for (i, shard) in self.inner.memtable.iter().enumerate() {
+            let mem = shard.read();
+            let mut entries = Vec::new();
+            let range = if prefix.is_empty() {
+                mem.entries.range::<Vec<u8>, _>(..)
+            } else {
+                mem.entries.range(prefix.to_vec()..)
+            };
+            for (_, entry) in range {
+                if !prefix.is_empty() && !entry.key.starts_with(prefix) { break; }
+                entries.push(Ok(entry.clone()));
+            }
+            iters.push(SourceIterator {
+                iter: Box::new(entries.into_iter()),
+                source_id: i,
+            });
+        }
+
+        // 2. SSTable Iterators
+        let mut source_id = 16;
+        for level in &self.inner.levels {
+            let sstables = level.read();
+            for sstable in sstables.iter() {
+                // For a true streaming implementation without .collect(),
+                // we would need to keep the sstable Arc and level ReadGuard alive.
+                // To avoid deep refactoring for this PR, we'll keep the collect() for SSTables
+                // but use a MergeIterator for correct deduplication and ordering.
+                let sst_clone = Arc::clone(sstable);
+                let entries: Vec<io::Result<KVEntry>> = sst_clone.seek_prefix(prefix).collect();
+                iters.push(SourceIterator {
+                    iter: Box::new(entries.into_iter()),
+                    source_id,
+                });
+                source_id += 1;
+            }
+        }
+
+        MergeIterator::new(iters, prefix.to_vec())
     }
 
     pub fn scan_with_predicate<F>(&self, prefix: &[u8], predicate: F) -> Vec<KVEntry>

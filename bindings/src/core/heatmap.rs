@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_heat_tracker_basic() {
-        let mut tracker = HeatTracker::new(100);
+        let tracker = HeatTracker::new(100);
         let key = b"test_key";
 
         tracker.record_access(key, QueryType::Read);

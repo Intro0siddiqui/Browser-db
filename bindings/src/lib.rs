@@ -1,9 +1,11 @@
 pub mod core;
 pub mod ffi;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::collections::HashMap;
 use std::{fs::{self, File}, io};
+use parking_lot::RwLock;
 use serde::{Serialize, Deserialize};
 use fs2::FileExt;
 
@@ -77,8 +79,85 @@ pub struct SettingEntry {
     pub value: String,
 }
 
+pub struct Container {
+    pub name: String,
+    pub switcher: Arc<ModeSwitcher>,
+    pub pku: u16, // Hardware Protection Key for Hajr HAL
+}
+
+impl Container {
+    pub fn history(&self) -> HistoryTable<'_> { HistoryTable { container: self } }
+    pub fn cookies(&self) -> CookiesTable<'_> { CookiesTable { container: self } }
+    pub fn cache(&self) -> CacheTable<'_> { CacheTable { container: self } }
+    pub fn localstore(&self) -> LocalStoreTable<'_> { LocalStoreTable { container: self } }
+    pub fn settings(&self) -> SettingsTable<'_> { SettingsTable { container: self } }
+
+    pub fn set_mode(&self, mode: DatabaseMode) -> Result<(), Box<dyn std::error::Error>> {
+        let path = self.switcher.base_path.clone();
+        self.switcher.switch_mode(mode, &path)?;
+        Ok(())
+    }
+
+    pub fn wipe(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let current_mode = self.switcher.current_mode.read();
+        match &*current_mode {
+            CurrentMode::Persistent(pm) => {
+                pm.history.clear()?;
+                pm.cookies.clear()?;
+                pm.cache.clear()?;
+                pm.localstore.clear()?;
+                pm.settings.clear()?;
+            },
+            CurrentMode::Ultra(um) => {
+                um.history.data.write().clear();
+                um.history.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
+                um.cookies.data.write().clear();
+                um.cookies.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
+                um.cache.data.write().clear();
+                um.cache.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
+                um.localstore.data.write().clear();
+                um.localstore.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
+                um.settings.data.write().clear();
+                um.settings.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn stats(&self) -> Result<DatabaseStats, Box<dyn std::error::Error>> {
+        let history = self.history().count()? as u64;
+        let cookies = self.cookies().count()? as u64;
+        let cache = self.cache().count()? as u64;
+        let localstore = self.localstore().count()? as u64;
+        let settings = self.settings().count()? as u64;
+
+        let mut disk_usage = 0;
+        if let Ok(entries) = fs::read_dir(&self.switcher.base_path) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    disk_usage += metadata.len();
+                }
+            }
+        }
+
+        Ok(DatabaseStats {
+            total_entries: history + cookies + cache + localstore + settings,
+            history_entries: history,
+            cookie_entries: cookies,
+            cache_entries: cache,
+            localstore_entries: localstore,
+            settings_entries: settings,
+            memory_usage_mb: 0,
+            disk_usage_mb: disk_usage / 1024 / 1024,
+        })
+    }
+}
+
 pub struct BrowserDB {
-    switcher: Arc<ModeSwitcher>,
+    base_path: PathBuf,
+    config: ModeConfig,
+    containers: RwLock<HashMap<String, Arc<Container>>>,
+    default_container: Arc<Container>,
     _lock_file: File,
 }
 
@@ -118,79 +197,110 @@ impl BrowserDB {
             enable_heat_tracking: true,
             ext_config,
         };
-        
-        let switcher = ModeSwitcher::new(path, DatabaseMode::Persistent, config)?;
-        Ok(Self {
-            switcher: Arc::new(switcher),
+
+        let db = Self {
+            base_path: path.to_path_buf(),
+            config,
+            containers: RwLock::new(HashMap::new()),
+            // Temporarily dummy, will be replaced
+            default_container: Arc::new(Container {
+                name: "dummy".to_string(),
+                switcher: Arc::new(ModeSwitcher::new(path, DatabaseMode::Persistent, ModeConfig {
+                    max_memory: 0,
+                    enable_compression: false,
+                    enable_heat_tracking: false,
+                    ext_config: BrowserDBConfig::default(),
+                })?),
+                pku: 0,
+            }),
             _lock_file: lock_file,
+        };
+        
+        let default = db.container("default")?;
+        Ok(Self {
+            default_container: default,
+            ..db
         })
     }
 
-    pub fn history(&self) -> HistoryTable<'_> { HistoryTable { db: self } }
-    pub fn cookies(&self) -> CookiesTable<'_> { CookiesTable { db: self } }
-    pub fn cache(&self) -> CacheTable<'_> { CacheTable { db: self } }
-    pub fn localstore(&self) -> LocalStoreTable<'_> { LocalStoreTable { db: self } }
-    pub fn settings(&self) -> SettingsTable<'_> { SettingsTable { db: self } }
+    pub fn container(&self, name: &str) -> Result<Arc<Container>, Box<dyn std::error::Error>> {
+        // Sanitize name to prevent path traversal
+        let sanitized_name: String = name.chars()
+            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
 
-    pub fn set_mode(&self, mode: DatabaseMode) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.switcher.base_path.clone();
-        self.switcher.switch_mode(mode, &path)?;
-        Ok(())
-    }
+        if sanitized_name.is_empty() || sanitized_name != name {
+            return Err("Invalid container name: only alphanumeric, underscore, and hyphen allowed".into());
+        }
 
-
-    pub fn stats(&self) -> Result<DatabaseStats, Box<dyn std::error::Error>> {
-        let history = self.history().count()? as u64;
-        let cookies = self.cookies().count()? as u64;
-        let cache = self.cache().count()? as u64;
-        let localstore = self.localstore().count()? as u64;
-        let settings = self.settings().count()? as u64;
-
-        let mut disk_usage = 0;
-        if let Ok(entries) = fs::read_dir(&self.switcher.base_path) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    disk_usage += metadata.len();
-                }
+        {
+            let containers = self.containers.read();
+            if let Some(c) = containers.get(&sanitized_name) {
+                return Ok(Arc::clone(c));
             }
         }
 
-        Ok(DatabaseStats {
-            total_entries: history + cookies + cache + localstore + settings,
-            history_entries: history,
-            cookie_entries: cookies,
-            cache_entries: cache,
-            localstore_entries: localstore,
-            settings_entries: settings,
-            memory_usage_mb: 0, // In-memory tables (Ultra) and MemTables are not easily tracked yet
-            disk_usage_mb: disk_usage / 1024 / 1024,
-        })
+        let mut containers = self.containers.write();
+        let container_path = self.base_path.join(format!("container_{}", sanitized_name));
+        if !container_path.exists() {
+            fs::create_dir_all(&container_path)?;
+        }
+
+        let mut index_defs = HashMap::new();
+        let ls_indices = vec![
+            crate::core::lsm_tree::IndexDefinition {
+                name: "value".to_string(),
+                extractor: Arc::new(|_k, v| {
+                    if let Ok(entry) = bincode::deserialize::<LocalStoreEntry>(v) {
+                        Some(format!("idx:localstore:value:{}:{}", entry.value, entry.key).into_bytes())
+                    } else {
+                        None
+                    }
+                }),
+            }
+        ];
+        index_defs.insert(crate::core::format::TableType::LocalStore, ls_indices);
+
+        let switcher = ModeSwitcher::new_with_indices(&container_path, DatabaseMode::Persistent, self.config.clone(), index_defs)?;
+
+        // Assign a pseudo-PKU based on name hash for Hajr HAL isolation
+        let pku = (ffi::calculate_hash(&sanitized_name) % 16) as u16;
+
+        let container = Arc::new(Container {
+            name: sanitized_name.clone(),
+            switcher: Arc::new(switcher),
+            pku,
+        });
+        containers.insert(sanitized_name, Arc::clone(&container));
+        Ok(container)
+    }
+
+    pub fn history(&self) -> HistoryTable<'_> {
+        HistoryTable { container: &self.default_container }
+    }
+    pub fn cookies(&self) -> CookiesTable<'_> {
+        CookiesTable { container: &self.default_container }
+    }
+    pub fn cache(&self) -> CacheTable<'_> {
+        CacheTable { container: &self.default_container }
+    }
+    pub fn localstore(&self) -> LocalStoreTable<'_> {
+        LocalStoreTable { container: &self.default_container }
+    }
+    pub fn settings(&self) -> SettingsTable<'_> {
+        SettingsTable { container: &self.default_container }
+    }
+
+    pub fn set_mode(&self, mode: DatabaseMode) -> Result<(), Box<dyn std::error::Error>> {
+        self.container("default").unwrap().set_mode(mode)
+    }
+
+    pub fn stats(&self) -> Result<DatabaseStats, Box<dyn std::error::Error>> {
+        self.container("default").unwrap().stats()
     }
     
     pub fn wipe(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let current_mode = self.switcher.current_mode.read();
-        match &*current_mode {
-            CurrentMode::Persistent(pm) => {
-                pm.history.clear()?;
-                pm.cookies.clear()?;
-                pm.cache.clear()?;
-                pm.localstore.clear()?;
-                pm.settings.clear()?;
-            },
-            CurrentMode::Ultra(um) => {
-                um.history.data.write().clear();
-                um.history.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
-                um.cookies.data.write().clear();
-                um.cookies.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
-                um.cache.data.write().clear();
-                um.cache.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
-                um.localstore.data.write().clear();
-                um.localstore.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
-                um.settings.data.write().clear();
-                um.settings.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        Ok(())
+        self.container("default").unwrap().wipe()
     }
 }
 
@@ -206,10 +316,10 @@ pub struct DatabaseStats {
     pub disk_usage_mb: u64,
 }
 
-pub struct HistoryTable<'a> { db: &'a BrowserDB }
+pub struct HistoryTable<'a> { container: &'a Container }
 impl<'a> HistoryTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
-        match &*self.db.switcher.current_mode.read() {
+        match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.history.all_entries().len()),
             CurrentMode::Ultra(um) => Ok(um.history.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
         }
@@ -219,7 +329,7 @@ impl<'a> HistoryTable<'a> {
         let key = bincode::serialize(&entry.url_hash)?;
         let value = bincode::serialize(entry)?;
         
-        match &*self.db.switcher.current_mode.read() {
+        match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.history.put(key, value)?,
             CurrentMode::Ultra(um) => um.history.put(key, value),
         }
@@ -228,7 +338,7 @@ impl<'a> HistoryTable<'a> {
     
     pub fn get(&self, url_hash: u128) -> Result<Option<HistoryEntry>, Box<dyn std::error::Error>> {
         let key = bincode::serialize(&url_hash)?;
-        let value_opt = match &*self.db.switcher.current_mode.read() {
+        let value_opt = match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.history.get(&key).map(|e| e.value),
             CurrentMode::Ultra(um) => um.history.get(&key),
         };
@@ -246,7 +356,7 @@ impl<'a> HistoryTable<'a> {
     }
 
     pub fn wipe_domain(&self, domain: &str) -> Result<usize, Box<dyn std::error::Error>> {
-        let current_mode = self.db.switcher.current_mode.read();
+        let current_mode = self.container.switcher.current_mode.read();
         let all_entries: Vec<(Vec<u8>, Vec<u8>)> = match &*current_mode {
             CurrentMode::Persistent(pm) => {
                 pm.history.all_entries().into_iter().map(|e| (e.key, e.value)).collect()
@@ -269,10 +379,10 @@ impl<'a> HistoryTable<'a> {
     }
 }
 
-pub struct CookiesTable<'a> { db: &'a BrowserDB }
+pub struct CookiesTable<'a> { container: &'a Container }
 impl<'a> CookiesTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
-        match &*self.db.switcher.current_mode.read() {
+        match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.cookies.all_entries().len()),
             CurrentMode::Ultra(um) => Ok(um.cookies.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
         }
@@ -281,7 +391,7 @@ impl<'a> CookiesTable<'a> {
     pub fn insert(&self, entry: &CookieEntry) -> Result<(), Box<dyn std::error::Error>> {
         let key = bincode::serialize(&(entry.domain_hash, &entry.name))?;
         let value = bincode::serialize(entry)?;
-        match &*self.db.switcher.current_mode.read() {
+        match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.cookies.put(key, value)?,
             CurrentMode::Ultra(um) => um.cookies.put(key, value),
         }
@@ -289,10 +399,10 @@ impl<'a> CookiesTable<'a> {
     }
 }
 
-pub struct CacheTable<'a> { db: &'a BrowserDB }
+pub struct CacheTable<'a> { container: &'a Container }
 impl<'a> CacheTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
-        match &*self.db.switcher.current_mode.read() {
+        match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.cache.all_entries().len()),
             CurrentMode::Ultra(um) => Ok(um.cache.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
         }
@@ -301,7 +411,7 @@ impl<'a> CacheTable<'a> {
     pub fn insert(&self, entry: &CacheEntry) -> Result<(), Box<dyn std::error::Error>> {
         let key = bincode::serialize(&entry.url_hash)?;
         let value = bincode::serialize(entry)?;
-        match &*self.db.switcher.current_mode.read() {
+        match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.cache.put(key, value)?,
             CurrentMode::Ultra(um) => um.cache.put(key, value),
         }
@@ -310,7 +420,7 @@ impl<'a> CacheTable<'a> {
 
     pub fn get(&self, url_hash: u128) -> Result<Option<CacheEntry>, Box<dyn std::error::Error>> {
         let key = bincode::serialize(&url_hash)?;
-        let value_opt = match &*self.db.switcher.current_mode.read() {
+        let value_opt = match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.cache.get(&key).map(|e| e.value),
             CurrentMode::Ultra(um) => um.cache.get(&key),
         };
@@ -324,52 +434,39 @@ impl<'a> CacheTable<'a> {
     }
 }
 
-pub struct LocalStoreTable<'a> { db: &'a BrowserDB }
+pub struct LocalStoreTable<'a> { container: &'a Container }
 impl<'a> LocalStoreTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
-        match &*self.db.switcher.current_mode.read() {
+        match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.localstore.all_entries().len()),
             CurrentMode::Ultra(um) => Ok(um.localstore.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
         }
     }
 
     pub fn insert(&self, entry: &LocalStoreEntry) -> Result<(), Box<dyn std::error::Error>> {
-        self.insert_with_index(entry, &[])
-    }
-
-    pub fn insert_with_index(&self, entry: &LocalStoreEntry, index_fields: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
         let primary_key = bincode::serialize(&(entry.origin_hash, &entry.key))?;
         let value = bincode::serialize(entry)?;
 
-        match &*self.db.switcher.current_mode.read() {
-            CurrentMode::Persistent(pm) => {
-                let mut batch = crate::core::lsm_tree::Batch::new();
-                batch.put(primary_key.clone(), value);
-                for field in index_fields {
-                    if *field == "value" {
-                        let idx_key = format!("idx:localstore:value:{}:{}", entry.value, entry.key);
-                        batch.put(idx_key.into_bytes(), primary_key.clone());
-                    }
-                }
-                pm.localstore.apply_batch(batch)?;
-            },
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.localstore.put(primary_key, value)?,
             CurrentMode::Ultra(um) => {
-                um.localstore.put(primary_key.clone(), value);
-                for field in index_fields {
-                    if *field == "value" {
-                        let idx_key = format!("idx:localstore:value:{}:{}", entry.value, entry.key);
-                        um.localstore.put(idx_key.into_bytes(), primary_key.clone());
-                    }
-                }
+                um.localstore.put(primary_key.clone(), value.clone());
+                // Ultra mode still needs manual indexing for now or update it as well
+                let idx_key = format!("idx:localstore:value:{}:{}", entry.value, entry.key);
+                um.localstore.put(idx_key.into_bytes(), primary_key);
             }
         }
         Ok(())
     }
 
+    pub fn insert_with_index(&self, entry: &LocalStoreEntry, _index_fields: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+        self.insert(entry)
+    }
+
     pub fn get_by_origin(&self, origin_hash: u128) -> Result<Vec<LocalStoreEntry>, Box<dyn std::error::Error>> {
         let prefix = bincode::serialize(&origin_hash)?;
 
-        let values: Vec<Vec<u8>> = match &*self.db.switcher.current_mode.read() {
+        let values: Vec<Vec<u8>> = match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => {
                 pm.localstore.scan_prefix(&prefix).into_iter().map(|e| e.value).collect()
             },
@@ -397,7 +494,7 @@ impl<'a> LocalStoreTable<'a> {
 pub type Filter<'a> = Box<dyn Fn(&LocalStoreEntry) -> bool + 'a>;
 
 pub struct QueryBuilder<'q, 'a> {
-    table: &'q LocalStoreTable<'a>,
+    pub table: &'q LocalStoreTable<'a>,
     prefix: Vec<u8>,
     filters: Vec<Filter<'a>>,
     limit: Option<usize>,
@@ -437,7 +534,7 @@ impl<'q, 'a> QueryBuilder<'q, 'a> {
     }
 
     pub fn execute(self) -> Result<Vec<LocalStoreEntry>, Box<dyn std::error::Error>> {
-        let current_mode = self.table.db.switcher.current_mode.read();
+        let current_mode = self.table.container.switcher.current_mode.read();
 
         let mut results = Vec::new();
 
@@ -446,7 +543,15 @@ impl<'q, 'a> QueryBuilder<'q, 'a> {
                 // Optimized path if we have value_eq and indices
                 if let Some(val) = &self.value_eq {
                     let idx_prefix = format!("idx:localstore:value:{}:", val).into_bytes();
-                    let idx_entries = pm.localstore.scan_prefix(&idx_prefix);
+
+                    // Use the native secondary index
+                    let index_tree = pm.localstore.inner.indices.iter().find(|i| i.name == "value");
+                    let idx_entries = if let Some(idx) = index_tree {
+                        idx.tree.scan_prefix(&idx_prefix)
+                    } else {
+                        pm.localstore.scan_prefix(&idx_prefix)
+                    };
+
                     for idx_kv in idx_entries {
                         if let Some(primary_kv) = pm.localstore.get(&idx_kv.value) {
                             if let Ok(entry) = bincode::deserialize::<LocalStoreEntry>(&primary_kv.value) {
@@ -501,10 +606,10 @@ impl<'q, 'a> QueryBuilder<'q, 'a> {
     }
 }
 
-pub struct SettingsTable<'a> { db: &'a BrowserDB }
+pub struct SettingsTable<'a> { container: &'a Container }
 impl<'a> SettingsTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
-        match &*self.db.switcher.current_mode.read() {
+        match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.settings.all_entries().len()),
             CurrentMode::Ultra(um) => Ok(um.settings.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
         }
@@ -512,7 +617,7 @@ impl<'a> SettingsTable<'a> {
     pub fn set(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
         let k = key.as_bytes().to_vec();
         let v = value.as_bytes().to_vec();
-        match &*self.db.switcher.current_mode.read() {
+        match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.settings.put(k, v)?,
             CurrentMode::Ultra(um) => um.settings.put(k, v),
         }
@@ -521,7 +626,7 @@ impl<'a> SettingsTable<'a> {
     
     pub fn get(&self, key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
         let k = key.as_bytes();
-        let value_opt = match &*self.db.switcher.current_mode.read() {
+        let value_opt = match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.settings.get(k).map(|e| e.value),
             CurrentMode::Ultra(um) => um.settings.get(k),
         };

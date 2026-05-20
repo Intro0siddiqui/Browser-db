@@ -1,12 +1,9 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write, Seek};
 use tempfile::tempdir;
-use browserdb::core::lsm_tree::{LSMTree, MemTable, SSTable};
-use browserdb::core::format::{EntryType, TableType, BDBLogEntry};
+use browserdb::core::lsm_tree::LSMTree;
+use browserdb::core::format::TableType;
 use browserdb::core::config::BrowserDBConfig;
-use std::sync::Arc;
-use browserdb::BrowserDB;
-use std::collections::BTreeMap;
 
 #[test]
 fn test_merge_stream_corrupt_sst() -> io::Result<()> {

@@ -59,6 +59,11 @@ impl UltraTable {
         Self::default()
     }
 
+    pub fn clear(&self) {
+        self.data.write().clear();
+        self.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
         if self.data.write().insert(key, value).is_none() {
             self.entry_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -99,15 +104,23 @@ impl PersistentMode {
     }
 
     pub fn new(path: &Path, config: &ModeConfig) -> std::io::Result<Self> {
+        Self::new_with_indices(path, config, HashMap::new())
+    }
+
+    pub fn new_with_indices(
+        path: &Path,
+        config: &ModeConfig,
+        mut index_defs: HashMap<TableType, Vec<crate::core::lsm_tree::IndexDefinition>>
+    ) -> std::io::Result<Self> {
         // max_memtable_size_mb dictates the memtable size in bytes
         let max_mem = config.ext_config.lsm_tree.max_memtable_size_mb * 1024 * 1024;
         Ok(Self {
             path: path.to_path_buf(),
-            history: LSMTree::new(path, TableType::History, max_mem, config.ext_config.clone())?,
-            cookies: LSMTree::new(path, TableType::Cookies, max_mem, config.ext_config.clone())?,
-            cache: LSMTree::new(path, TableType::Cache, max_mem, config.ext_config.clone())?,
-            localstore: LSMTree::new(path, TableType::LocalStore, max_mem, config.ext_config.clone())?,
-            settings: LSMTree::new(path, TableType::Settings, max_mem, config.ext_config.clone())?,
+            history: LSMTree::new_with_indices(path, TableType::History, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::History).unwrap_or_default())?,
+            cookies: LSMTree::new_with_indices(path, TableType::Cookies, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::Cookies).unwrap_or_default())?,
+            cache: LSMTree::new_with_indices(path, TableType::Cache, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::Cache).unwrap_or_default())?,
+            localstore: LSMTree::new_with_indices(path, TableType::LocalStore, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::LocalStore).unwrap_or_default())?,
+            settings: LSMTree::new_with_indices(path, TableType::Settings, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::Settings).unwrap_or_default())?,
         })
     }
 }
@@ -136,6 +149,14 @@ impl UltraMode {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn clear(&self) {
+        self.history.clear();
+        self.cookies.clear();
+        self.cache.clear();
+        self.localstore.clear();
+        self.settings.clear();
+    }
 }
 
 pub enum CurrentMode {
@@ -151,8 +172,17 @@ pub struct ModeSwitcher {
 
 impl ModeSwitcher {
     pub fn new(path: &Path, mode: DatabaseMode, config: ModeConfig) -> std::io::Result<Self> {
+        Self::new_with_indices(path, mode, config, HashMap::new())
+    }
+
+    pub fn new_with_indices(
+        path: &Path,
+        mode: DatabaseMode,
+        config: ModeConfig,
+        index_defs: HashMap<TableType, Vec<crate::core::lsm_tree::IndexDefinition>>
+    ) -> std::io::Result<Self> {
         let current = match mode {
-            DatabaseMode::Persistent => CurrentMode::Persistent(PersistentMode::new(path, &config)?),
+            DatabaseMode::Persistent => CurrentMode::Persistent(PersistentMode::new_with_indices(path, &config, index_defs)?),
             DatabaseMode::Ultra => CurrentMode::Ultra(Box::new(UltraMode::new())),
         };
         
