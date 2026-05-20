@@ -109,16 +109,7 @@ impl Container {
                 pm.settings.clear()?;
             },
             CurrentMode::Ultra(um) => {
-                um.history.data.write().clear();
-                um.history.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
-                um.cookies.data.write().clear();
-                um.cookies.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
-                um.cache.data.write().clear();
-                um.cache.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
-                um.localstore.data.write().clear();
-                um.localstore.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
-                um.settings.data.write().clear();
-                um.settings.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
+                um.clear();
             }
         }
         Ok(())
@@ -286,15 +277,15 @@ impl BrowserDB {
     }
 
     pub fn set_mode(&self, mode: DatabaseMode) -> Result<(), Box<dyn std::error::Error>> {
-        self.container("default").unwrap().set_mode(mode)
+        self.default_container.set_mode(mode)
     }
 
     pub fn stats(&self) -> Result<DatabaseStats, Box<dyn std::error::Error>> {
-        self.container("default").unwrap().stats()
+        self.default_container.stats()
     }
     
     pub fn wipe(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.container("default").unwrap().wipe()
+        self.default_container.wipe()
     }
 }
 

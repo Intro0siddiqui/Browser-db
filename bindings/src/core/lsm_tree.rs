@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{BTreeMap, BinaryHeap};
 use std::cmp::Ordering;
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockReadGuard};
 use memmap2::Mmap;
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 
@@ -205,15 +205,77 @@ fn read_compressed_entry<R: io::Read>(reader: &mut R, full_key: &[u8]) -> io::Re
     reader.read_exact(&mut value)?;
 
     let timestamp = reader.read_u64::<LittleEndian>()?;
-    let _crc = reader.read_u32::<LittleEndian>()?;
+    let read_crc = reader.read_u32::<LittleEndian>()?;
+
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&[entry_type as u8]);
+
+    let mut shared_buf = Vec::new();
+    crate::core::format::write_varint(&mut shared_buf, shared as u64)?;
+    hasher.update(&shared_buf);
+
+    hasher.update(&key_suffix);
+    hasher.update(&value);
+    hasher.update(&timestamp.to_le_bytes());
+    let calculated_crc = hasher.finalize();
+
+    if read_crc != calculated_crc {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "CRC mismatch in compressed entry"));
+    }
 
     Ok(BDBLogEntry {
         entry_type,
         key,
         value,
         timestamp,
-        entry_crc: _crc,
+        entry_crc: read_crc,
     })
+}
+
+struct MemTableIteratorWrapper<'a> {
+    _guard: RwLockReadGuard<'a, MemTable>,
+    iter: std::collections::btree_map::Range<'a, Vec<u8>, KVEntry>,
+    prefix: Vec<u8>,
+}
+
+impl<'a> MemTableIteratorWrapper<'a> {
+    fn new(guard: RwLockReadGuard<'a, MemTable>, prefix: Vec<u8>) -> Self {
+        let range = if prefix.is_empty() {
+            guard.entries.range::<Vec<u8>, _>(..)
+        } else {
+            guard.entries.range(prefix.clone()..)
+        };
+
+        // SAFETY: The range iterator's lifetime is tied to the MemTable entries inside the guard.
+        // Since we move the guard into the struct alongside the iterator, the entries will
+        // outlive the iterator.
+        let iter = unsafe {
+            std::mem::transmute::<
+                std::collections::btree_map::Range<'_, Vec<u8>, KVEntry>,
+                std::collections::btree_map::Range<'a, Vec<u8>, KVEntry>,
+            >(range)
+        };
+
+        Self {
+            _guard: guard,
+            iter,
+            prefix,
+        }
+    }
+}
+
+impl<'a> Iterator for MemTableIteratorWrapper<'a> {
+    type Item = io::Result<KVEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((_key, entry)) = self.iter.next() {
+            if !self.prefix.is_empty() && !entry.key.starts_with(&self.prefix) {
+                return None;
+            }
+            return Some(Ok(entry.clone()));
+        }
+        None
+    }
 }
 
 pub struct SourceIterator<'a> {
@@ -1013,22 +1075,10 @@ impl LSMTree {
         let mut iters = Vec::new();
 
         // 1. MemTable Iterators
-        // We collect MemTable entries because they are small and already in RAM.
-        // For true streaming from MemTable, we would need to keep the shard ReadGuard alive.
         for (i, shard) in self.inner.memtable.iter().enumerate() {
-            let mem = shard.read();
-            let mut entries = Vec::new();
-            let range = if prefix.is_empty() {
-                mem.entries.range::<Vec<u8>, _>(..)
-            } else {
-                mem.entries.range(prefix.to_vec()..)
-            };
-            for (_, entry) in range {
-                if !prefix.is_empty() && !entry.key.starts_with(prefix) { break; }
-                entries.push(Ok(entry.clone()));
-            }
+            let guard = shard.read();
             iters.push(SourceIterator {
-                iter: Box::new(entries.into_iter()),
+                iter: Box::new(MemTableIteratorWrapper::new(guard, prefix.to_vec())),
                 source_id: i,
             });
         }
