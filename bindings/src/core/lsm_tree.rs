@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::cmp::Ordering;
 use parking_lot::{RwLock, RwLockReadGuard};
 use memmap2::Mmap;
+use self_cell::self_cell;
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 
 use crate::core::format::{BDBLogEntry, EntryType, TableType, BDBFileHeader, BDBFileFooter, BDB_HEADER_SIZE, BDB_FOOTER_SIZE, BDB_BLOCK_SIZE, BDB_RESTART_INTERVAL};
@@ -164,9 +165,12 @@ fn write_compressed_entry<W: io::Write>(writer: &mut W, entry: &BDBLogEntry, sha
     hasher.update(&[entry.entry_type as u8]);
 
     // Use consistent varint hashing for shared length
-    let mut shared_buf = Vec::new();
-    crate::core::format::write_varint(&mut shared_buf, shared as u64)?;
-    hasher.update(&shared_buf);
+    let mut shared_buf = [0u8; 10];
+    let n = {
+        let mut writer_ref = &mut shared_buf[..];
+        crate::core::format::write_varint(&mut writer_ref, shared as u64)?
+    };
+    hasher.update(&shared_buf[..n]);
 
     hasher.update(&entry.key[shared..]);
     hasher.update(&entry.value);
@@ -210,9 +214,12 @@ fn read_compressed_entry<R: io::Read>(reader: &mut R, full_key: &[u8]) -> io::Re
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&[entry_type as u8]);
 
-    let mut shared_buf = Vec::new();
-    crate::core::format::write_varint(&mut shared_buf, shared as u64)?;
-    hasher.update(&shared_buf);
+    let mut shared_buf = [0u8; 10];
+    let n = {
+        let mut writer_ref = &mut shared_buf[..];
+        crate::core::format::write_varint(&mut writer_ref, shared as u64)?
+    };
+    hasher.update(&shared_buf[..n]);
 
     hasher.update(&key_suffix);
     hasher.update(&value);
@@ -232,33 +239,34 @@ fn read_compressed_entry<R: io::Read>(reader: &mut R, full_key: &[u8]) -> io::Re
     })
 }
 
+type BTreeMapRange<'a> = std::collections::btree_map::Range<'a, Vec<u8>, KVEntry>;
+
+self_cell!(
+    struct MemTableIterCell<'a> {
+        owner: RwLockReadGuard<'a, MemTable>,
+
+        #[covariant]
+        dependent: BTreeMapRange,
+    }
+);
+
 struct MemTableIteratorWrapper<'a> {
-    _guard: RwLockReadGuard<'a, MemTable>,
-    iter: std::collections::btree_map::Range<'a, Vec<u8>, KVEntry>,
+    cell: MemTableIterCell<'a>,
     prefix: Vec<u8>,
 }
 
 impl<'a> MemTableIteratorWrapper<'a> {
     fn new(guard: RwLockReadGuard<'a, MemTable>, prefix: Vec<u8>) -> Self {
-        let range = if prefix.is_empty() {
-            guard.entries.range::<Vec<u8>, _>(..)
-        } else {
-            guard.entries.range(prefix.clone()..)
-        };
-
-        // SAFETY: The range iterator's lifetime is tied to the MemTable entries inside the guard.
-        // Since we move the guard into the struct alongside the iterator, the entries will
-        // outlive the iterator.
-        let iter = unsafe {
-            std::mem::transmute::<
-                std::collections::btree_map::Range<'_, Vec<u8>, KVEntry>,
-                std::collections::btree_map::Range<'a, Vec<u8>, KVEntry>,
-            >(range)
-        };
+        let cell = MemTableIterCell::new(guard, |guard| {
+            if prefix.is_empty() {
+                guard.entries.range::<Vec<u8>, _>(..)
+            } else {
+                guard.entries.range(prefix.clone()..)
+            }
+        });
 
         Self {
-            _guard: guard,
-            iter,
+            cell,
             prefix,
         }
     }
@@ -268,13 +276,16 @@ impl<'a> Iterator for MemTableIteratorWrapper<'a> {
     type Item = io::Result<KVEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some((_key, entry)) = self.iter.next() {
-            if !self.prefix.is_empty() && !entry.key.starts_with(&self.prefix) {
-                return None;
+        let prefix = &self.prefix;
+        self.cell.with_dependent_mut(|_guard, iter| {
+            if let Some((_key, entry)) = iter.next() {
+                if !prefix.is_empty() && !entry.key.starts_with(prefix) {
+                    return None;
+                }
+                return Some(Ok(entry.clone()));
             }
-            return Some(Ok(entry.clone()));
-        }
-        None
+            None
+        })
     }
 }
 
@@ -319,15 +330,23 @@ impl<'a> Ord for HeapNode<'a> {
     }
 }
 
+self_cell!(
+    struct SSTableIterCell {
+        owner: Arc<SSTable>,
+
+        #[covariant]
+        dependent: SSTableIterator,
+    }
+);
+
 struct SSTableStreamWrapper {
-    _sst: Arc<SSTable>,
-    iter: SSTableIterator<'static>,
+    cell: SSTableIterCell,
 }
 
 impl Iterator for SSTableStreamWrapper {
     type Item = io::Result<KVEntry>;
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
+        self.cell.with_dependent_mut(|_sst, iter| iter.next())
     }
 }
 
@@ -1084,30 +1103,15 @@ impl LSMTree {
         }
 
         // 2. SSTable Iterators
-        // We bypass the level lock issues by leaking the SSTableIterator which
-        // only depends on the Mmap which is already behind an Arc.
         let mut source_id = 16;
         for level in &self.inner.levels {
             let sstables = level.read();
             for sstable in sstables.iter() {
-                // seek_prefix returns an iterator with the lifetime of sstable.
-                // Since SSTable is Arc-wrapped and stored in self, we can safely
-                // extend the lifetime by leaking a reference if we ensure
-                // the Arc stays alive.
-                // However, a cleaner way is to wrap it in a struct that owns the Arc.
-
                 let sst_clone = Arc::clone(sstable);
-                let sst_ptr = Arc::as_ptr(&sst_clone);
-                // UNSAFE: We're extending the lifetime of the iterator by promising
-                // that the Arc<SSTable> outlives the iterator.
-                // We keep the Arc alive in a vector that we move into MergeIterator.
-                let iter = unsafe { (*sst_ptr).seek_prefix(prefix) };
+                let cell = SSTableIterCell::new(sst_clone, |sst| sst.seek_prefix(prefix));
 
                 iters.push(SourceIterator {
-                    iter: Box::new(SSTableStreamWrapper {
-                        _sst: sst_clone,
-                        iter,
-                    }),
+                    iter: Box::new(SSTableStreamWrapper { cell }),
                     source_id,
                 });
                 source_id += 1;
