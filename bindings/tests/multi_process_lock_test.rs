@@ -1,6 +1,5 @@
 use browserdb::BrowserDB;
 use tempfile::tempdir;
-use std::fs;
 
 #[test]
 fn test_multi_process_locking() {

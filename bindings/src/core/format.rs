@@ -8,8 +8,9 @@ pub const BDB_VERSION: u8 = 1;
 pub const BDB_HEADER_SIZE: usize = 47;
 pub const BDB_FOOTER_SIZE: usize = 60;
 pub const BDB_BLOCK_SIZE: usize = 4096;
+pub const BDB_RESTART_INTERVAL: usize = 16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum TableType {
     History = 1,

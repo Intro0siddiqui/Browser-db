@@ -1,5 +1,4 @@
 use std::ffi::{CString, CStr};
-use std::ptr;
 use tempfile::tempdir;
 use browserdb::ffi::*;
 
