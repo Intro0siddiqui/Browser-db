@@ -382,6 +382,24 @@ impl<'a> CookiesTable<'a> {
         }
         Ok(())
     }
+
+    pub fn get_all(&self) -> Result<Vec<CookieEntry>, Box<dyn std::error::Error>> {
+        let current_mode = self.container.switcher.current_mode.read();
+        let all_entries: Vec<(Vec<u8>, Vec<u8>)> = match &*current_mode {
+            CurrentMode::Persistent(pm) => {
+                pm.cookies.all_entries().into_iter().map(|e| (e.key, e.value)).collect()
+            }
+            CurrentMode::Ultra(um) => um.cookies.all_entries(),
+        };
+
+        let mut cookies = Vec::with_capacity(all_entries.len());
+        for (_key, value) in all_entries {
+            if let Ok(entry) = bincode::deserialize::<CookieEntry>(&value) {
+                cookies.push(entry);
+            }
+        }
+        Ok(cookies)
+    }
 }
 
 pub struct CacheTable<'a> { container: &'a Container }
