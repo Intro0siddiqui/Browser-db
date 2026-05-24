@@ -1,5 +1,6 @@
 use crate::BrowserDB;
 use crate::HistoryEntry;
+use crate::LocalStoreEntry;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
@@ -79,6 +80,194 @@ pub extern "C" fn browserdb_free_string(s: *mut c_char) {
     if !s.is_null() {
         unsafe { let _ = CString::from_raw(s); };
     }
+}
+
+#[no_mangle]
+pub extern "C" fn browserdb_localstore_insert(
+    db: *mut BrowserDB,
+    origin: *const c_char,
+    key: *const c_char,
+    value: *const c_char,
+) -> c_int {
+    if db.is_null() || origin.is_null() || key.is_null() || value.is_null() { return -1; }
+    let db = unsafe { &*db };
+    let origin_str = unsafe { CStr::from_ptr(origin) }.to_string_lossy().into_owned();
+    let key_str = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
+    let value_str = unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned();
+
+    let origin_hash = calculate_hash(&origin_str);
+    let entry = LocalStoreEntry {
+        origin_hash,
+        key: key_str,
+        value: value_str,
+    };
+
+    match db.localstore().insert(&entry) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn browserdb_localstore_get(
+    db: *mut BrowserDB,
+    origin: *const c_char,
+    key: *const c_char,
+) -> *mut c_char {
+    if db.is_null() || origin.is_null() || key.is_null() { return ptr::null_mut(); }
+    let db = unsafe { &*db };
+    let origin_str = unsafe { CStr::from_ptr(origin) }.to_string_lossy().into_owned();
+    let key_str = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
+
+    let origin_hash = calculate_hash(&origin_str);
+    match db.localstore().get_by_origin(origin_hash) {
+        Ok(entries) => {
+            for entry in entries {
+                if entry.key == key_str {
+                    return CString::new(entry.value).unwrap().into_raw();
+                }
+            }
+            ptr::null_mut()
+        }
+        _ => ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn browserdb_localstore_remove(
+    db: *mut BrowserDB,
+    origin: *const c_char,
+    key: *const c_char,
+) -> c_int {
+    if db.is_null() || origin.is_null() || key.is_null() { return -1; }
+    let db = unsafe { &*db };
+    let origin_str = unsafe { CStr::from_ptr(origin) }.to_string_lossy().into_owned();
+    let key_str = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
+    let origin_hash = calculate_hash(&origin_str);
+
+    let current_mode = db.localstore().container.switcher.current_mode.read();
+    let key_bytes = match bincode::serialize(&(origin_hash, &key_str)) {
+        Ok(k) => k,
+        Err(_) => return -1,
+    };
+
+    match &*current_mode {
+        crate::core::modes::CurrentMode::Persistent(pm) => {
+            let _ = pm.localstore.delete(key_bytes);
+        }
+        crate::core::modes::CurrentMode::Ultra(um) => {
+            um.localstore.delete(&key_bytes);
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn browserdb_localstore_clear(
+    db: *mut BrowserDB,
+    origin: *const c_char,
+) -> c_int {
+    if db.is_null() || origin.is_null() { return -1; }
+    let db = unsafe { &*db };
+    let origin_str = unsafe { CStr::from_ptr(origin) }.to_string_lossy().into_owned();
+    let origin_hash = calculate_hash(&origin_str);
+
+    let current_mode = db.localstore().container.switcher.current_mode.read();
+    match db.localstore().get_by_origin(origin_hash) {
+        Ok(entries) => {
+            for entry in entries {
+                let key_bytes = bincode::serialize(&(origin_hash, &entry.key)).unwrap();
+                match &*current_mode {
+                    crate::core::modes::CurrentMode::Persistent(pm) => {
+                        let _ = pm.localstore.delete(key_bytes);
+                    }
+                    crate::core::modes::CurrentMode::Ultra(um) => {
+                        um.localstore.delete(&key_bytes);
+                    }
+                }
+            }
+            0
+        }
+        _ => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn browserdb_localstore_get_all(
+    db: *mut BrowserDB,
+    origin: *const c_char,
+    callback: extern "C" fn(*const c_char, *const c_char, *mut std::ffi::c_void),
+    user_data: *mut std::ffi::c_void,
+) -> c_int {
+    if db.is_null() || origin.is_null() { return -1; }
+    let db = unsafe { &*db };
+    let origin_str = unsafe { CStr::from_ptr(origin) }.to_string_lossy().into_owned();
+    let origin_hash = calculate_hash(&origin_str);
+
+    match db.localstore().get_by_origin(origin_hash) {
+        Ok(entries) => {
+            for entry in entries {
+                let k_c = CString::new(entry.key).unwrap();
+                let v_c = CString::new(entry.value).unwrap();
+                callback(k_c.as_ptr(), v_c.as_ptr(), user_data);
+            }
+            0
+        }
+        _ => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn browserdb_settings_set(
+    db: *mut BrowserDB,
+    key: *const c_char,
+    value: *const c_char,
+) -> c_int {
+    if db.is_null() || key.is_null() || value.is_null() { return -1; }
+    let db = unsafe { &*db };
+    let key_str = unsafe { CStr::from_ptr(key) }.to_string_lossy();
+    let value_str = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+
+    match db.settings().set(&key_str, &value_str) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn browserdb_settings_get(
+    db: *mut BrowserDB,
+    key: *const c_char,
+) -> *mut c_char {
+    if db.is_null() || key.is_null() { return ptr::null_mut(); }
+    let db = unsafe { &*db };
+    let key_str = unsafe { CStr::from_ptr(key) }.to_string_lossy();
+
+    match db.settings().get(&key_str) {
+        Ok(Some(val)) => CString::new(val).unwrap().into_raw(),
+        _ => ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn browserdb_settings_remove(
+    db: *mut BrowserDB,
+    key: *const c_char,
+) -> c_int {
+    if db.is_null() || key.is_null() { return -1; }
+    let db = unsafe { &*db };
+    let key_bytes = unsafe { CStr::from_ptr(key) }.to_bytes().to_vec();
+
+    let current_mode = db.settings().container.switcher.current_mode.read();
+    match &*current_mode {
+        crate::core::modes::CurrentMode::Persistent(pm) => {
+            let _ = pm.settings.delete(key_bytes);
+        }
+        crate::core::modes::CurrentMode::Ultra(um) => {
+            um.settings.delete(&key_bytes);
+        }
+    }
+    0
 }
 
 pub(crate) fn calculate_hash(s: &str) -> u128 {
