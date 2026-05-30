@@ -463,6 +463,32 @@ impl<'a> LocalStoreTable<'a> {
         Ok(())
     }
 
+    pub fn remove(&self, origin_hash: u128, key: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let primary_key = bincode::serialize(&(origin_hash, key))?;
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.localstore.delete(primary_key)?,
+            CurrentMode::Ultra(um) => um.localstore.delete(&primary_key),
+        }
+        Ok(())
+    }
+
+    pub fn clear_origin(&self, origin_hash: u128) -> Result<(), Box<dyn std::error::Error>> {
+        let prefix = bincode::serialize(&origin_hash)?;
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => {
+                let entries = pm.localstore.scan_prefix(&prefix);
+                for entry in entries {
+                    pm.localstore.delete(entry.key)?;
+                }
+            },
+            CurrentMode::Ultra(um) => {
+                let mut current = um.localstore.data.write();
+                current.retain(|k, _| !k.starts_with(&prefix));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn extract_value_index(_k: &[u8], v: &[u8]) -> Option<Vec<u8>> {
         if let Ok(entry) = bincode::deserialize::<LocalStoreEntry>(v) {
             Some(format!("idx:localstore:value:{}:{}", entry.value, entry.key).into_bytes())
