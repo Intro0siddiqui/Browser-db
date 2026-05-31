@@ -28,7 +28,6 @@ impl WALManager {
         let writer_clone = Arc::clone(&writer);
         let stop_signal_clone = Arc::clone(&stop_signal);
 
-        #[cfg(not(test))]
         let flush_thread = Some(thread::spawn(move || {
             while !stop_signal_clone.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(5));
@@ -44,15 +43,19 @@ impl WALManager {
             let _ = w.get_ref().sync_all();
         }));
 
-        #[cfg(test)]
-        let flush_thread = None;
-
         Ok(Self {
             writer,
             path: path.to_path_buf(),
             stop_signal,
             flush_thread,
         })
+    }
+
+    pub fn stop_flush_thread(&mut self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.flush_thread.take() {
+            let _ = handle.join();
+        }
     }
 
     pub fn log(&mut self, entry: &mut BDBLogEntry) -> io::Result<()> {

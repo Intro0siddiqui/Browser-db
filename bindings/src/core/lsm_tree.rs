@@ -1256,6 +1256,8 @@ impl LSMTree {
     }
     
     pub fn flush(&self) -> io::Result<()> {
+        self.inner.wal.write().stop_flush_thread();
+
         let mut all_entries = BTreeMap::new();
         for shard in &self.inner.memtable {
             let mut mem = shard.write();
