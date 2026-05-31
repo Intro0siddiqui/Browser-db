@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Write, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
