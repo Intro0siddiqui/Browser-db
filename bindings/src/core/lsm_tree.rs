@@ -470,154 +470,168 @@ impl SSTable {
     }
 
     pub fn create(level: u8, entries: &BTreeMap<Vec<u8>, KVEntry>, base_path: &Path, table_type: TableType) -> io::Result<Self> {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?.as_millis();
-        let filename = format!("{}_{}_{}_{}.sst", 
-            match table_type {
-                TableType::History => "history",
-                TableType::Cookies => "cookies",
-                TableType::Cache => "cache",
-                TableType::LocalStore => "localstore",
-                TableType::Settings => "settings",
-            }, 
-            level, timestamp, entries.len());
-        let file_path = base_path.join(filename);
-        
-        let mut file = retry_on_permission_denied(|| {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(&file_path)
-        })?;
-
-        let mut header = BDBFileHeader::new(table_type);
-        header.write(&mut file)?;
-        let header_size = BDB_HEADER_SIZE;
-
-        // BTreeMap is already sorted by key
-        
-        let mut index = Vec::new();
-        let mut offset = header_size as u64;
-        let mut total_key_size = 0;
-        let mut total_value_size = 0;
-        let mut max_entry_size = 0;
-        
-        let mut last_key: Vec<u8> = Vec::new();
-        let mut count = 0;
-
-        for entry in entries.values() {
-            let bdb_entry = BDBLogEntry {
-                entry_type: entry.entry_type,
-                key: entry.key.clone(),
-                value: entry.value.clone(),
-                timestamp: entry.timestamp,
-                entry_crc: 0,
-            };
+        let mut attempts = 0;
+        loop {
+            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?.as_millis();
+            let filename = format!("{}_{}_{}_{}.sst", 
+                match table_type {
+                    TableType::History => "history",
+                    TableType::Cookies => "cookies",
+                    TableType::Cache => "cache",
+                    TableType::LocalStore => "localstore",
+                    TableType::Settings => "settings",
+                }, 
+                level, timestamp, entries.len());
+            let file_path = base_path.join(filename);
             
-            let pos = offset;
+            let res = (|| {
+                let mut file = retry_on_permission_denied(|| {
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .open(&file_path)
+                })?;
 
-            // Prefix Compression Logic
-            let shared = if count % BDB_RESTART_INTERVAL == 0 {
-                0
-            } else {
-                let mut shared = 0;
-                while shared < last_key.len() && shared < entry.key.len() && last_key[shared] == entry.key[shared] {
-                    shared += 1;
+                let mut header = BDBFileHeader::new(table_type);
+                header.write(&mut file)?;
+                let header_size = BDB_HEADER_SIZE;
+
+                // BTreeMap is already sorted by key
+                
+                let mut index = Vec::new();
+                let mut offset = header_size as u64;
+                let mut total_key_size = 0;
+                let mut total_value_size = 0;
+                let mut max_entry_size = 0;
+                
+                let mut last_key: Vec<u8> = Vec::new();
+                let mut count = 0;
+
+                for entry in entries.values() {
+                    let bdb_entry = BDBLogEntry {
+                        entry_type: entry.entry_type,
+                        key: entry.key.clone(),
+                        value: entry.value.clone(),
+                        timestamp: entry.timestamp,
+                        entry_crc: 0,
+                    };
+                    
+                    let pos = offset;
+
+                    // Prefix Compression Logic
+                    let shared = if count % BDB_RESTART_INTERVAL == 0 {
+                        0
+                    } else {
+                        let mut shared = 0;
+                        while shared < last_key.len() && shared < entry.key.len() && last_key[shared] == entry.key[shared] {
+                            shared += 1;
+                        }
+                        shared
+                    };
+
+                    // For now, we still use BDBLogEntry which writes the full key.
+                    // To support true prefix compression in the file, we'd need to modify BDBLogEntry::write.
+                    // Let's implement a "Compressed" write path.
+
+                    let size = self::write_compressed_entry(&mut file, &bdb_entry, shared)?;
+                    
+                    index.push(IndexEntry {
+                        key: entry.key.clone(),
+                        position: pos,
+                        size,
+                        timestamp: entry.timestamp,
+                    });
+                    
+                    offset += size as u64;
+                    total_key_size += entry.key.len() as u64;
+                    total_value_size += entry.value.len() as u64;
+                    max_entry_size = max_entry_size.max(size as u32);
+                    last_key = entry.key.clone();
+                    count += 1;
                 }
-                shared
-            };
 
-            // For now, we still use BDBLogEntry which writes the full key.
-            // To support true prefix compression in the file, we'd need to modify BDBLogEntry::write.
-            // Let's implement a "Compressed" write path.
+                let data_end = offset;
 
-            let size = self::write_compressed_entry(&mut file, &bdb_entry, shared)?;
-            
-            index.push(IndexEntry {
-                key: entry.key.clone(),
-                position: pos,
-                size,
-                timestamp: entry.timestamp,
-            });
-            
-            offset += size as u64;
-            total_key_size += entry.key.len() as u64;
-            total_value_size += entry.value.len() as u64;
-            max_entry_size = max_entry_size.max(size as u32);
-            last_key = entry.key.clone();
-            count += 1;
+                // Calculate Block Checksums
+                file.sync_all()?;
+                
+                let mut block_checksums = Vec::new();
+                let mut curr = BDB_HEADER_SIZE as u64;
+                let mut buffer = vec![0u8; BDB_BLOCK_SIZE];
+                
+                // REUSE the existing handle to avoid Windows sharing violations
+                file.seek(SeekFrom::Start(curr))?;
+                
+                while curr < data_end {
+                    let to_read = (data_end - curr).min(BDB_BLOCK_SIZE as u64) as usize;
+                    file.read_exact(&mut buffer[..to_read])?;
+                    
+                    let mut hasher = crc32fast::Hasher::new();
+                    hasher.update(&buffer[..to_read]);
+                    block_checksums.push(hasher.finalize());
+                    curr += to_read as u64;
+                }
+
+                // Restore position to write checksums
+                file.seek(SeekFrom::Start(data_end))?;
+
+                // Write Checksums to file
+                let crc_offset = offset;
+                for &crc in &block_checksums {
+                    file.write_u32::<LittleEndian>(crc)?;
+                    offset += 4;
+                }
+
+                let footer = BDBFileFooter {
+                    entry_count: entries.len() as u64,
+                    file_size: offset + BDB_FOOTER_SIZE as u64,
+                    data_offset: header_size as u64,
+                    block_crc_offset: crc_offset,
+                    max_entry_size,
+                    total_key_size,
+                    total_value_size,
+                    compression_ratio: 100,
+                    reserved: [0; 2],
+                    file_crc: 0,
+                };
+                footer.write(&mut file)?;
+                file.sync_all()?;
+                
+                // On Windows, mapping a file that is open for writing can be problematic.
+                // We close the write handle first and retry opening for read/map.
+                drop(file);
+                
+                let mmap = retry_on_permission_denied(|| {
+                    let mmap_file = File::open(&file_path)?;
+                    unsafe { Mmap::map(&mmap_file) }
+                })?;
+                
+                // Build Bloom Filter
+                let mut bloom = BloomFilter::new(index.len(), 0.01);
+                for idx in &index {
+                    bloom.add(&idx.key);
+                }
+
+                Ok(Self {
+                    level,
+                    file_path: file_path.clone(),
+                    mmap,
+                    index,
+                    bloom_filter: Some(bloom),
+                    block_checksums,
+                })
+            })();
+
+            match res {
+                Ok(sstable) => return Ok(sstable),
+                Err(_e) if attempts < 5 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => return Err(e),
+            }
         }
-
-        let data_end = offset;
-
-        // Calculate Block Checksums
-        file.sync_all()?;
-        
-        let mut block_checksums = Vec::new();
-        let mut curr = BDB_HEADER_SIZE as u64;
-        let mut buffer = vec![0u8; BDB_BLOCK_SIZE];
-        
-        // REUSE the existing handle to avoid Windows sharing violations
-        file.seek(SeekFrom::Start(curr))?;
-        
-        while curr < data_end {
-            let to_read = (data_end - curr).min(BDB_BLOCK_SIZE as u64) as usize;
-            file.read_exact(&mut buffer[..to_read])?;
-            
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(&buffer[..to_read]);
-            block_checksums.push(hasher.finalize());
-            curr += to_read as u64;
-        }
-
-        // Restore position to write checksums
-        file.seek(SeekFrom::Start(data_end))?;
-
-        // Write Checksums to file
-        let crc_offset = offset;
-        for &crc in &block_checksums {
-            file.write_u32::<LittleEndian>(crc)?;
-            offset += 4;
-        }
-
-        let footer = BDBFileFooter {
-            entry_count: entries.len() as u64,
-            file_size: offset + BDB_FOOTER_SIZE as u64,
-            data_offset: header_size as u64,
-            block_crc_offset: crc_offset,
-            max_entry_size,
-            total_key_size,
-            total_value_size,
-            compression_ratio: 100,
-            reserved: [0; 2],
-            file_crc: 0,
-        };
-        footer.write(&mut file)?;
-        file.sync_all()?;
-        
-        // On Windows, mapping a file that is open for writing can be problematic.
-        // We close the write handle first and retry opening for read/map.
-        drop(file);
-        
-        let mmap = retry_on_permission_denied(|| {
-            let mmap_file = File::open(&file_path)?;
-            unsafe { Mmap::map(&mmap_file) }
-        })?;
-        
-        // Build Bloom Filter
-        let mut bloom = BloomFilter::new(index.len(), 0.01);
-        for idx in &index {
-            bloom.add(&idx.key);
-        }
-
-        Ok(Self {
-            level,
-            file_path,
-            mmap,
-            index,
-            bloom_filter: Some(bloom),
-            block_checksums,
-        })
     }
     
     pub fn get(&self, key: &[u8]) -> Option<KVEntry> {

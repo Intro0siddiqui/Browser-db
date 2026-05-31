@@ -49,6 +49,9 @@ fn test_blob_after_flush() {
     let val = vec![1u8; 100 * 1024];
     lsm_tree.put(key.clone(), val.clone()).unwrap();
 
+    // Give Windows a breather
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
     lsm_tree.flush().unwrap();
 
     let res = lsm_tree.get(&key).expect("Should find key after flush");
