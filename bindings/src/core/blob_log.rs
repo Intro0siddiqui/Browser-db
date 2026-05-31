@@ -32,13 +32,16 @@ pub struct BlobLog {
 
 impl BlobLog {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let file = retry_on_permission_denied(|| {
+        let mut file = retry_on_permission_denied(|| {
             OpenOptions::new()
                 .create(true)
-                .append(true)
+                .write(true)
                 .read(true)
                 .open(path)
         })?;
+        
+        file.seek(SeekFrom::End(0))?;
+        
         Ok(Self {
             file: Mutex::new(file),
             path: path.to_path_buf(),

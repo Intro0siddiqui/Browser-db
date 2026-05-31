@@ -16,11 +16,15 @@ pub struct WALManager {
 
 impl WALManager {
     pub fn new(path: &Path) -> io::Result<Self> {
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
             .read(true)
             .open(path)?;
+            
+        // Seek to the end manually instead of using append(true).
+        // On Windows, append(true) creates a handle that cannot be truncated via set_len(0).
+        file.seek(std::io::SeekFrom::End(0))?;
 
         let writer = Arc::new(Mutex::new(BufWriter::with_capacity(32 * 1024, file)));
         let stop_signal = Arc::new(AtomicBool::new(false));
