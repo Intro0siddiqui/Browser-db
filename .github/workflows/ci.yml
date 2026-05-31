@@ -16,9 +16,6 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    defaults:
-      run:
-        working-directory: bindings
 
     steps:
       - name: Checkout repository
@@ -29,11 +26,9 @@ jobs:
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-        with:
-          work-dir: bindings
 
       - name: Build
-        run: cargo build --verbose
+        run: cargo build -p browserdb --verbose
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test -p browserdb --verbose
