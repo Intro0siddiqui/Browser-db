@@ -562,7 +562,7 @@ impl SSTable {
             let to_read = (data_end - curr).min(BDB_BLOCK_SIZE as u64) as usize;
             file.read_exact(&mut buffer[..to_read])?;
             
-            let mut hasher = Hasher::new();
+            let mut hasher = crc32fast::Hasher::new();
             hasher.update(&buffer[..to_read]);
             block_checksums.push(hasher.finalize());
             curr += to_read as u64;
