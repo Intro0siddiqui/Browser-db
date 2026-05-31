@@ -104,11 +104,16 @@ where
     loop {
         match f() {
             Ok(res) => return Ok(res),
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempts < 10 => {
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempts < 50 => {
                 attempts += 1;
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if attempts > 0 || e.kind() == io::ErrorKind::PermissionDenied {
+                    eprintln!("BrowserDB FATAL Windows Lock Error (WAL) after {} attempts: {}", attempts, e);
+                }
+                return Err(e);
+            }
         }
     }
 }
