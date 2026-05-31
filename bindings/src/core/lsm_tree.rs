@@ -419,6 +419,32 @@ impl<'a> Iterator for MergeIterator<'a> {
     }
 }
 
+#[cfg(windows)]
+fn retry_on_permission_denied<F, T>(mut f: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    let mut attempts = 0;
+    loop {
+        match f() {
+            Ok(res) => return Ok(res),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempts < 10 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn retry_on_permission_denied<F, T>(mut f: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    f()
+}
+
 impl SSTable {
     pub fn verify_blocks(&self, start_pos: usize, end_pos: usize) -> io::Result<()> {
         let first_block = (start_pos - BDB_HEADER_SIZE) / BDB_BLOCK_SIZE;
@@ -529,19 +555,21 @@ impl SSTable {
         let mut curr = BDB_HEADER_SIZE as u64;
         let mut buffer = vec![0u8; BDB_BLOCK_SIZE];
         
-        // Use a separate handle for reading to avoid cursor conflicts
-        let mut read_handle = File::open(&file_path)?;
-        read_handle.seek(SeekFrom::Start(curr))?;
+        // REUSE the existing handle to avoid Windows sharing violations
+        file.seek(SeekFrom::Start(curr))?;
         
         while curr < data_end {
             let to_read = (data_end - curr).min(BDB_BLOCK_SIZE as u64) as usize;
-            read_handle.read_exact(&mut buffer[..to_read])?;
+            file.read_exact(&mut buffer[..to_read])?;
             
-            let mut hasher = crc32fast::Hasher::new();
+            let mut hasher = Hasher::new();
             hasher.update(&buffer[..to_read]);
             block_checksums.push(hasher.finalize());
             curr += to_read as u64;
         }
+
+        // Restore position to write checksums
+        file.seek(SeekFrom::Start(data_end))?;
 
         // Write Checksums to file
         let crc_offset = offset;
@@ -566,11 +594,13 @@ impl SSTable {
         file.sync_all()?;
         
         // On Windows, mapping a file that is open for writing can be problematic.
-        // We close the write handle first.
+        // We close the write handle first and retry opening for read/map.
         drop(file);
         
-        let mmap_file = File::open(&file_path)?;
-        let mmap = unsafe { Mmap::map(&mmap_file)? };
+        let mmap = retry_on_permission_denied(|| {
+            let mmap_file = File::open(&file_path)?;
+            unsafe { Mmap::map(&mmap_file) }
+        })?;
         
         // Build Bloom Filter
         let mut bloom = BloomFilter::new(index.len(), 0.01);

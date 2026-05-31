@@ -80,7 +80,19 @@ impl WALManager {
         let mut w = self.writer.lock().unwrap();
         w.flush()?;
         let file = w.get_mut();
-        file.set_len(0)?;
+        
+        let mut attempts = 0;
+        loop {
+            match file.set_len(0) {
+                Ok(_) => break,
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempts < 10 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        
         file.sync_all()?;
         Ok(())
     }
