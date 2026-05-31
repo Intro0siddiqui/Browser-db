@@ -69,8 +69,15 @@ impl BlobLog {
 
     pub fn swap_file(&self, new_path: &Path) -> io::Result<()> {
         let mut file = self.file.lock().unwrap();
-        // Close current file by dropping it
-        *file = File::open("/dev/null")?; // Temporary dummy
+        
+        // On Windows, we must close the handle before renaming.
+        // We can do this by opening a temporary dummy file or just dropping the handle.
+        // Since we are inside a MutexGuard, we can't easily 'drop' it without replacing it.
+        
+        let dummy_path = if cfg!(windows) { "nul" } else { "/dev/null" };
+        if let Ok(dummy) = OpenOptions::new().read(true).open(dummy_path) {
+            *file = dummy;
+        }
 
         std::fs::rename(new_path, &self.path)?;
 

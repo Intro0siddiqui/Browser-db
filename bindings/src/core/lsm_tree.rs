@@ -1,5 +1,6 @@
-use std::fs::{self, OpenOptions};
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom};
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -523,17 +524,24 @@ impl SSTable {
 
         // Calculate Block Checksums
         file.sync_all()?;
-        let mmap_for_crc = unsafe { Mmap::map(&file)? };
+        
         let mut block_checksums = Vec::new();
-        let mut curr = BDB_HEADER_SIZE;
-        while curr < data_end as usize {
-            let end = (curr + BDB_BLOCK_SIZE).min(data_end as usize);
+        let mut curr = BDB_HEADER_SIZE as u64;
+        let mut buffer = vec![0u8; BDB_BLOCK_SIZE];
+        
+        // Use a separate handle for reading to avoid cursor conflicts
+        let mut read_handle = File::open(&file_path)?;
+        read_handle.seek(SeekFrom::Start(curr))?;
+        
+        while curr < data_end {
+            let to_read = (data_end - curr).min(BDB_BLOCK_SIZE as u64) as usize;
+            read_handle.read_exact(&mut buffer[..to_read])?;
+            
             let mut hasher = crc32fast::Hasher::new();
-            hasher.update(&mmap_for_crc[curr..end]);
+            hasher.update(&buffer[..to_read]);
             block_checksums.push(hasher.finalize());
-            curr = end;
+            curr += to_read as u64;
         }
-        drop(mmap_for_crc);
 
         // Write Checksums to file
         let crc_offset = offset;
@@ -555,10 +563,14 @@ impl SSTable {
             file_crc: 0,
         };
         footer.write(&mut file)?;
-        
         file.sync_all()?;
         
-        let mmap = unsafe { Mmap::map(&file)? };
+        // On Windows, mapping a file that is open for writing can be problematic.
+        // We close the write handle first.
+        drop(file);
+        
+        let mmap_file = File::open(&file_path)?;
+        let mmap = unsafe { Mmap::map(&mmap_file)? };
         
         // Build Bloom Filter
         let mut bloom = BloomFilter::new(index.len(), 0.01);
