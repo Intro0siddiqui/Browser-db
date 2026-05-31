@@ -430,7 +430,7 @@ where
             Ok(res) => return Ok(res),
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempts < 10 => {
                 attempts += 1;
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Err(e) => return Err(e),
         }
@@ -482,11 +482,13 @@ impl SSTable {
             level, timestamp, entries.len());
         let file_path = base_path.join(filename);
         
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&file_path)?;
+        let mut file = retry_on_permission_denied(|| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&file_path)
+        })?;
 
         let mut header = BDBFileHeader::new(table_type);
         header.write(&mut file)?;
@@ -1344,7 +1346,7 @@ impl LSMTreeInner {
             let paths_to_remove: Vec<_> = tables_to_compact.iter().map(|t| t.file_path.clone()).collect();
             drop(tables_to_compact);
             for path in paths_to_remove {
-                if let Err(e) = std::fs::remove_file(&path) {
+                if let Err(e) = retry_on_permission_denied(|| std::fs::remove_file(&path)) {
                     eprintln!("Failed to remove SSTable file {}: {}", path.display(), e);
                 }
             }

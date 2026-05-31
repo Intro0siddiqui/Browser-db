@@ -79,7 +79,7 @@ impl BlobLog {
             *file = dummy;
         }
 
-        std::fs::rename(new_path, &self.path)?;
+        retry_on_permission_denied(|| std::fs::rename(new_path, &self.path))?;
 
         let new_file = OpenOptions::new()
             .create(true)
@@ -90,6 +90,32 @@ impl BlobLog {
         *file = new_file;
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn retry_on_permission_denied<F, T>(mut f: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    let mut attempts = 0;
+    loop {
+        match f() {
+            Ok(res) => return Ok(res),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempts < 10 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn retry_on_permission_denied<F, T>(mut f: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    f()
 }
 
 pub struct BlobLogIterator {

@@ -81,21 +81,37 @@ impl WALManager {
         w.flush()?;
         let file = w.get_mut();
         
-        let mut attempts = 0;
-        loop {
-            match file.set_len(0) {
-                Ok(_) => break,
-                Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempts < 10 => {
-                    attempts += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        
-        file.sync_all()?;
-        Ok(())
+        retry_on_permission_denied(|| {
+            file.set_len(0)?;
+            file.sync_all()
+        })
     }
+}
+
+#[cfg(windows)]
+fn retry_on_permission_denied<F, T>(mut f: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    let mut attempts = 0;
+    loop {
+        match f() {
+            Ok(res) => return Ok(res),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempts < 10 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn retry_on_permission_denied<F, T>(mut f: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    f()
 }
 
 impl Drop for WALManager {
