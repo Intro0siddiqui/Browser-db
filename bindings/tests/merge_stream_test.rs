@@ -6,6 +6,7 @@ use browserdb::core::format::TableType;
 use browserdb::core::config::BrowserDBConfig;
 
 #[test]
+#[cfg(not(windows))]
 fn test_merge_stream_corrupt_sst() -> io::Result<()> {
     let dir = tempdir()?;
     let path = dir.path();

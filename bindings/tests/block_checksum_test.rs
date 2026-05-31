@@ -20,6 +20,9 @@ fn test_block_checksum_verification() {
 
     // 1. Verify it works normally
     assert!(lsm_tree.get(&key).is_some());
+    
+    // Release the memory map and file handle so Windows allows modification
+    drop(lsm_tree);
 
     // 2. Corrupt a block in the SSTable
     for entry in std::fs::read_dir(path).unwrap() {
