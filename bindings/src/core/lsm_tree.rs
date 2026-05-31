@@ -723,13 +723,17 @@ impl SSTable {
     }
 
     pub fn open(file_path: PathBuf, level: u8) -> io::Result<Self> {
-        let mut file = OpenOptions::new().read(true).open(&file_path)?;
-        let _header = BDBFileHeader::read(&mut file)?;
-        let mmap = unsafe { Mmap::map(&file)? };
+        let mmap = retry_on_permission_denied(|| {
+            let file = OpenOptions::new().read(true).open(&file_path)?;
+            unsafe { Mmap::map(&file) }
+        })?;
         
         if mmap.len() < BDB_HEADER_SIZE + BDB_FOOTER_SIZE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "SSTable too small"));
         }
+
+        let mut header_cursor = io::Cursor::new(&mmap[0..BDB_HEADER_SIZE]);
+        let _header = BDBFileHeader::read(&mut header_cursor)?;
 
         let mut footer_cursor = io::Cursor::new(&mmap[mmap.len()-BDB_FOOTER_SIZE..]);
         let footer = BDBFileFooter::read(&mut footer_cursor)?;

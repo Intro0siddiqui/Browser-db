@@ -31,4 +31,4 @@ jobs:
         run: cargo build -p browserdb --verbose
 
       - name: Run tests
-        run: cargo test -p browserdb --verbose
+        run: cargo test -p browserdb --verbose -- --test-threads=1
