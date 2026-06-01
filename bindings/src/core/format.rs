@@ -42,6 +42,7 @@ pub enum EntryType {
     BatchStart = 4,
     BatchEnd = 5,
     BlobIndex = 6,
+    Increment = 7,
 }
 
 impl From<u8> for EntryType {
@@ -53,6 +54,7 @@ impl From<u8> for EntryType {
             4 => EntryType::BatchStart,
             5 => EntryType::BatchEnd,
             6 => EntryType::BlobIndex,
+            7 => EntryType::Increment,
             _ => EntryType::Insert,
         }
     }

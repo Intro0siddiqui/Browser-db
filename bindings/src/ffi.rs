@@ -270,6 +270,34 @@ pub extern "C" fn browserdb_settings_remove(
     0
 }
 
+#[no_mangle]
+pub extern "C" fn browserdb_localstore_increment(
+    db: *mut BrowserDB,
+    origin: *const c_char,
+    key: *const c_char,
+    delta: i64,
+) -> c_int {
+    if db.is_null() || origin.is_null() || key.is_null() { return -1; }
+    let db = unsafe { &*db };
+    let origin_str = unsafe { CStr::from_ptr(origin) }.to_string_lossy().into_owned();
+    let key_str = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
+
+    let origin_hash = calculate_hash(&origin_str);
+    let primary_key = match bincode::serialize(&(origin_hash, &key_str)) {
+        Ok(k) => k,
+        Err(_) => return -1,
+    };
+
+    match &*db.default_container.switcher.current_mode.read() {
+        crate::core::modes::CurrentMode::Persistent(pm) => {
+            if pm.localstore.increment(primary_key, delta).is_ok() { 0 } else { -1 }
+        }
+        crate::core::modes::CurrentMode::Ultra(um) => {
+            if um.localstore.increment(primary_key, delta).is_ok() { 0 } else { -1 }
+        }
+    }
+}
+
 pub(crate) fn calculate_hash(s: &str) -> u128 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

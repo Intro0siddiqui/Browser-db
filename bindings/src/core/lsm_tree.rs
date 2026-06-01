@@ -1149,6 +1149,23 @@ impl LSMTree {
         Ok(())
     }
 
+    pub fn increment(&self, key: Vec<u8>, delta: i64) -> io::Result<()> {
+        let value = delta.to_le_bytes().to_vec();
+
+        let mut wal_entry = BDBLogEntry::new(EntryType::Increment, key.clone(), value.clone());
+        self.inner.wal.write().log(&mut wal_entry)?;
+
+        let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
+        let mut mem = self.inner.memtable[shard].write();
+        mem.put(key, value, EntryType::Increment);
+
+        if mem.should_flush() {
+            drop(mem);
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn all_entries(&self) -> Vec<KVEntry> {
         self.scan_prefix(&[])
     }

@@ -80,6 +80,28 @@ impl UltraTable {
         }
     }
 
+    pub fn increment(&self, key: Vec<u8>, delta: i64) -> std::io::Result<()> {
+        let mut data = self.data.write();
+        let current_val = if let Some(existing) = data.get(&key) {
+            if existing.len() == 8 {
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(existing);
+                i64::from_le_bytes(buf)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let new_val = current_val.wrapping_add(delta);
+
+        if data.insert(key, new_val.to_le_bytes().to_vec()).is_none() {
+            self.entry_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
     pub fn all_entries(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
         self.data.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
