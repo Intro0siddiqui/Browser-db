@@ -18,6 +18,7 @@ pub enum TableType {
     Cache = 3,
     LocalStore = 4,
     Settings = 5,
+    Bookmarks = 6,
 }
 
 impl From<u8> for TableType {
@@ -28,6 +29,7 @@ impl From<u8> for TableType {
             3 => TableType::Cache,
             4 => TableType::LocalStore,
             5 => TableType::Settings,
+            6 => TableType::Bookmarks,
             _ => TableType::History,
         }
     }
