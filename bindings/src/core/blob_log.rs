@@ -64,7 +64,7 @@ impl BlobLog {
     pub fn get(&self, ptr: &BlobPointer) -> io::Result<Vec<u8>> {
         let mut file = self.file.lock().unwrap();
         file.seek(SeekFrom::Start(ptr.offset))?;
-        let entry = BDBLogEntry::read(&mut *file)?;
+        let entry = BDBLogEntry::read(&mut *file, crate::core::format::BDB_VERSION)?;
         Ok(entry.value)
     }
 
@@ -156,7 +156,7 @@ impl Iterator for BlobLogIterator {
         }
 
         let current_offset = self.offset;
-        match BDBLogEntry::read(&mut self.file) {
+        match BDBLogEntry::read(&mut self.file, crate::core::format::BDB_VERSION) {
             Ok(entry) => {
                 match self.file.seek(SeekFrom::Current(0)) {
                     Ok(new_offset) => {

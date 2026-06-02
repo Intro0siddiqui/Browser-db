@@ -4,7 +4,7 @@ use crc32fast::Hasher;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MAGIC_BYTES: &[u8; 9] = b"BROWSERDB";
-pub const BDB_VERSION: u8 = 1;
+pub const BDB_VERSION: u8 = 2;
 pub const BDB_HEADER_SIZE: usize = 47;
 pub const BDB_FOOTER_SIZE: usize = 60;
 pub const BDB_BLOCK_SIZE: usize = 4096;
@@ -290,7 +290,7 @@ impl BDBLogEntry {
         Ok(bytes_written)
     }
 
-    pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
+    pub fn read<R: Read>(reader: &mut R, version: u8) -> io::Result<Self> {
         let entry_type = reader.read_u8()?.into();
         let key_len = read_varint(reader)?;
         let value_len = read_varint(reader)?;
@@ -302,7 +302,13 @@ impl BDBLogEntry {
         reader.read_exact(&mut value)?;
         
         let timestamp = reader.read_u64::<LittleEndian>()?;
-        let expires_at = read_varint(reader).unwrap_or(0);
+        
+        let expires_at = if version >= 2 {
+            read_varint(reader).unwrap_or(0)
+        } else {
+            0
+        };
+
         let entry_crc = reader.read_u32::<LittleEndian>()?;
         
         Ok(Self {

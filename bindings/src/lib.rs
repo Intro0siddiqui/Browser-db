@@ -321,6 +321,8 @@ impl<'a> HistoryTable<'a> {
         Ok(())
     }
 
+    /// Inserts a history entry with a Time-To-Live.
+    /// Note: TTL is currently ignored in `CurrentMode::Ultra`.
     pub fn insert_with_ttl(&self, entry: &HistoryEntry, ttl_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
         let key = bincode::serialize(&entry.url_hash)?;
         let value = bincode::serialize(entry)?;

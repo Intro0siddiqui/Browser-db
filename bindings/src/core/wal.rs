@@ -80,7 +80,7 @@ impl WALManager {
         let mut reader = BufReader::new(file);
         let mut entries = Vec::new();
 
-        while let Ok(entry) = BDBLogEntry::read(&mut reader) {
+        while let Ok(entry) = BDBLogEntry::read(&mut reader, crate::core::format::BDB_VERSION) {
             entries.push(entry);
         }
 

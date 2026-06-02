@@ -82,16 +82,25 @@ impl UltraTable {
 
     pub fn increment(&self, key: &[u8], delta: i64) {
         let mut data = self.data.write();
-        let value = data.entry(key.to_vec()).or_insert_with(|| vec![0; 8]);
-        if value.len() == 8 {
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(value);
-            let current = i64::from_le_bytes(arr);
-            let new_val = current.wrapping_add(delta);
-            value.copy_from_slice(&new_val.to_le_bytes());
-        } else {
-            value.clear();
-            value.extend_from_slice(&delta.to_le_bytes());
+        let entry = data.entry(key.to_vec());
+        match entry {
+            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                let value = occupied.get_mut();
+                if value.len() == 8 {
+                    let mut arr = [0u8; 8];
+                    arr.copy_from_slice(value);
+                    let current = i64::from_le_bytes(arr);
+                    let new_val = current.wrapping_add(delta);
+                    value.copy_from_slice(&new_val.to_le_bytes());
+                } else {
+                    value.clear();
+                    value.extend_from_slice(&delta.to_le_bytes());
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(delta.to_le_bytes().to_vec());
+                self.entry_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
         }
     }
 

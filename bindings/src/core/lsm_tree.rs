@@ -51,7 +51,38 @@ impl MemTable {
         }
     }
 
-    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, entry_type: EntryType, expires_at: u64) {
+    pub fn put(&mut self, key: Vec<u8>, mut value: Vec<u8>, mut entry_type: EntryType, expires_at: u64) {
+        if entry_type == EntryType::Increment {
+            if let Some(existing) = self.entries.get(&key) {
+                if existing.entry_type == EntryType::Increment {
+                    if existing.value.len() == 8 && value.len() == 8 {
+                        let mut old_arr = [0u8; 8];
+                        old_arr.copy_from_slice(&existing.value);
+                        let mut new_arr = [0u8; 8];
+                        new_arr.copy_from_slice(&value);
+                        let old_val = i64::from_le_bytes(old_arr);
+                        let new_val = i64::from_le_bytes(new_arr);
+                        value = old_val.wrapping_add(new_val).to_le_bytes().to_vec();
+                    }
+                } else if existing.entry_type == EntryType::Insert || existing.entry_type == EntryType::Update {
+                    let base_val = if existing.value.len() == 8 {
+                        let mut arr = [0u8; 8];
+                        arr.copy_from_slice(&existing.value);
+                        i64::from_le_bytes(arr)
+                    } else {
+                        0
+                    };
+                    if value.len() == 8 {
+                        let mut arr = [0u8; 8];
+                        arr.copy_from_slice(&value);
+                        let delta = i64::from_le_bytes(arr);
+                        value = base_val.wrapping_add(delta).to_le_bytes().to_vec();
+                    }
+                    entry_type = EntryType::Insert;
+                }
+            }
+        }
+
         let entry = KVEntry {
             key: key.clone(),
             value,
@@ -393,10 +424,11 @@ impl<'a> Iterator for MergeIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+
         while let Some(mut node) = self.heap.pop() {
             let key = node.entry.key.clone();
+            let mut current_entry = node.entry.clone();
 
-            // Re-fill heap from the source iterator
             if let Some(res) = node.iter.next() {
                 match res {
                     Ok(next_entry) => {
@@ -410,22 +442,86 @@ impl<'a> Iterator for MergeIterator<'a> {
                 }
             }
 
-            // Prefix check
             if !self.prefix.is_empty() && !key.starts_with(&self.prefix) {
                 continue;
             }
 
-            // Deduplication and deletion check
             if !self.last_yielded_key.is_empty() && self.last_yielded_key == key {
-                continue; // Skip older version
+                continue;
+            }
+            self.last_yielded_key = key.clone();
+
+            let mut delta_sum: i64 = 0;
+            let mut has_increments = false;
+            let mut is_deleted = current_entry.deleted;
+            
+            if current_entry.entry_type == EntryType::Increment {
+                has_increments = true;
+                if current_entry.value.len() == 8 {
+                    let mut arr = [0u8; 8];
+                    arr.copy_from_slice(&current_entry.value);
+                    delta_sum = delta_sum.wrapping_add(i64::from_le_bytes(arr));
+                }
             }
 
-            self.last_yielded_key = key;
+            while let Some(peek_node) = self.heap.peek() {
+                if peek_node.entry.key != key {
+                    break;
+                }
+                
+                let mut next_node = self.heap.pop().unwrap();
+                let next_entry = next_node.entry.clone();
+                
+                if let Some(res) = next_node.iter.next() {
+                    match res {
+                        Ok(new_entry) => {
+                            self.heap.push(HeapNode {
+                                entry: new_entry,
+                                source_id: next_node.source_id,
+                                iter: next_node.iter,
+                            });
+                        }
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+                
+                if !has_increments {
+                    continue; 
+                }
 
-            if !node.entry.deleted && (node.entry.expires_at == 0 || node.entry.expires_at >= now) {
-                return Some(Ok(node.entry));
+                if next_entry.entry_type == EntryType::Increment {
+                    if next_entry.value.len() == 8 {
+                        let mut arr = [0u8; 8];
+                        arr.copy_from_slice(&next_entry.value);
+                        delta_sum = delta_sum.wrapping_add(i64::from_le_bytes(arr));
+                    }
+                } else {
+                    if next_entry.deleted {
+                        is_deleted = true;
+                        has_increments = false;
+                    } else {
+                        let base_val = if next_entry.value.len() == 8 {
+                            let mut arr = [0u8; 8];
+                            arr.copy_from_slice(&next_entry.value);
+                            i64::from_le_bytes(arr)
+                        } else {
+                            0
+                        };
+                        current_entry.value = base_val.wrapping_add(delta_sum).to_le_bytes().to_vec();
+                        current_entry.entry_type = EntryType::Insert;
+                        has_increments = false;
+                    }
+                }
             }
-            // If deleted or expired, we continue loop to find next unique key
+            
+            if has_increments {
+                current_entry.value = delta_sum.to_le_bytes().to_vec();
+                current_entry.entry_type = EntryType::Insert;
+            }
+
+            if !is_deleted && (current_entry.expires_at == 0 || current_entry.expires_at >= now) {
+                return Some(Ok(current_entry));
+            }
         }
         None
     }
@@ -1079,6 +1175,15 @@ impl LSMTree {
     pub fn put_with_ttl(&self, key: Vec<u8>, value: Vec<u8>, ttl_ms: u64) -> io::Result<()> {
         let expires_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 + ttl_ms;
 
+        // Write-Side Indexing
+        if !self.inner.is_index {
+            for idx in &self.inner.indices {
+                if let Some(idx_key) = (idx.extractor)(&key, &value) {
+                    idx.tree.put(idx_key, key.clone())?;
+                }
+            }
+        }
+
         let value_size = value.len();
         let mut entry_type = EntryType::Insert;
         let mut stored_value = value.clone();
@@ -1312,6 +1417,9 @@ impl LSMTree {
                     if !results.contains_key(&idx.key) {
                         // Directly read from mmap
                         if let Some(mut kv) = sstable.get_at_index(idx) {
+                            if kv.expires_at > 0 && kv.expires_at < SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 {
+                                continue;
+                            }
                             if kv.entry_type == EntryType::BlobIndex && !kv.deleted {
                                 if let Some(ptr) = BlobPointer::decode(&kv.value) {
                                     if let Ok(val) = self.inner.blob_log.get(&ptr) {
