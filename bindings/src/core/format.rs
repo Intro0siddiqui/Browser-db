@@ -42,6 +42,7 @@ pub enum EntryType {
     BatchStart = 4,
     BatchEnd = 5,
     BlobIndex = 6,
+    Increment = 7,
 }
 
 impl From<u8> for EntryType {
@@ -53,6 +54,7 @@ impl From<u8> for EntryType {
             4 => EntryType::BatchStart,
             5 => EntryType::BatchEnd,
             6 => EntryType::BlobIndex,
+            7 => EntryType::Increment,
             _ => EntryType::Insert,
         }
     }
@@ -206,6 +208,7 @@ pub struct BDBLogEntry {
     pub key: Vec<u8>,
     pub value: Vec<u8>,
     pub timestamp: u64,
+    pub expires_at: u64,
     pub entry_crc: u32,
 }
 
@@ -221,6 +224,23 @@ impl BDBLogEntry {
             key,
             value,
             timestamp,
+            expires_at: 0,
+            entry_crc: 0,
+        }
+    }
+
+    pub fn with_ttl(entry_type: EntryType, key: Vec<u8>, value: Vec<u8>, expires_at: u64) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        Self {
+            entry_type,
+            key,
+            value,
+            timestamp,
+            expires_at,
             entry_crc: 0,
         }
     }
@@ -231,6 +251,14 @@ impl BDBLogEntry {
         hasher.update(&self.key);
         hasher.update(&self.value);
         hasher.update(&self.timestamp.to_le_bytes());
+
+        let mut ttl_buf = [0u8; 10];
+        let n = {
+            let mut writer_ref = &mut ttl_buf[..];
+            crate::core::format::write_varint(&mut writer_ref, self.expires_at).unwrap_or(0)
+        };
+        hasher.update(&ttl_buf[..n]);
+
         hasher.finalize()
     }
 
@@ -254,6 +282,8 @@ impl BDBLogEntry {
         writer.write_u64::<LittleEndian>(self.timestamp)?;
         bytes_written += 8;
         
+        bytes_written += write_varint(writer, self.expires_at)?;
+
         writer.write_u32::<LittleEndian>(self.entry_crc)?;
         bytes_written += 4;
         
@@ -272,6 +302,7 @@ impl BDBLogEntry {
         reader.read_exact(&mut value)?;
         
         let timestamp = reader.read_u64::<LittleEndian>()?;
+        let expires_at = read_varint(reader).unwrap_or(0);
         let entry_crc = reader.read_u32::<LittleEndian>()?;
         
         Ok(Self {
@@ -279,6 +310,7 @@ impl BDBLogEntry {
             key,
             value,
             timestamp,
+            expires_at,
             entry_crc,
         })
     }

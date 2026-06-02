@@ -320,6 +320,26 @@ impl<'a> HistoryTable<'a> {
         }
         Ok(())
     }
+
+    pub fn insert_with_ttl(&self, entry: &HistoryEntry, ttl_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
+        let key = bincode::serialize(&entry.url_hash)?;
+        let value = bincode::serialize(entry)?;
+
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.history.put_with_ttl(key, value, ttl_ms)?,
+            CurrentMode::Ultra(um) => um.history.put(key, value), // UltraMode doesn't natively enforce background TTL out-of-box yet, we just do put for now
+        }
+        Ok(())
+    }
+
+    pub fn increment(&self, url_hash: u128, delta: i64) -> Result<(), Box<dyn std::error::Error>> {
+        let key = bincode::serialize(&url_hash)?;
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.history.increment(key, delta)?,
+            CurrentMode::Ultra(um) => um.history.increment(&key, delta),
+        }
+        Ok(())
+    }
     
     pub fn get(&self, url_hash: u128) -> Result<Option<HistoryEntry>, Box<dyn std::error::Error>> {
         let key = bincode::serialize(&url_hash)?;

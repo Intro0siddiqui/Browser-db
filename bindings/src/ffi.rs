@@ -57,6 +57,53 @@ pub extern "C" fn browserdb_history_insert(
 }
 
 #[no_mangle]
+pub extern "C" fn browserdb_history_insert_with_ttl(
+    db: *mut BrowserDB,
+    url: *const c_char,
+    title: *const c_char,
+    visit_count: u32,
+    ttl_ms: u64
+) -> c_int {
+    if db.is_null() || url.is_null() || title.is_null() { return -1; }
+    let db = unsafe { &*db };
+
+    let url_str = unsafe { CStr::from_ptr(url) }.to_string_lossy().into_owned();
+    let title_str = unsafe { CStr::from_ptr(title) }.to_string_lossy().into_owned();
+
+    let url_hash = calculate_hash(&url_str);
+    let entry = HistoryEntry {
+        timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),
+        url: url_str,
+        url_hash,
+        title: title_str,
+        visit_count,
+    };
+
+    match db.history().insert_with_ttl(&entry, ttl_ms) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn browserdb_history_increment(
+    db: *mut BrowserDB,
+    url_hash_low: u64,
+    url_hash_high: u64,
+    delta: i64
+) -> c_int {
+    if db.is_null() { return -1; }
+    let db = unsafe { &*db };
+
+    let url_hash = ((url_hash_high as u128) << 64) | (url_hash_low as u128);
+
+    match db.history().increment(url_hash, delta) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn browserdb_history_get_title(
     db: *mut BrowserDB,
     url_hash_low: u64,

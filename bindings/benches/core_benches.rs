@@ -21,7 +21,7 @@ fn bench_memtable_insertion(c: &mut Criterion) {
                 (key, value)
             },
             |(key, value)| {
-                memtable.put(key, value, EntryType::Insert);
+                memtable.put(key, value, EntryType::Insert, 0);
             },
             BatchSize::SmallInput,
         )

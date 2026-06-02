@@ -21,13 +21,14 @@ pub struct KVEntry {
     pub key: Vec<u8>,
     pub value: Vec<u8>,
     pub timestamp: u64,
+    pub expires_at: u64,
     pub entry_type: EntryType,
     pub deleted: bool,
 }
 
 impl KVEntry {
     pub fn size(&self) -> usize {
-        self.key.len() + self.value.len() + 8 + 1 // timestamp + type
+        self.key.len() + self.value.len() + 8 + 8 + 1 // timestamp + expires_at + type
     }
 }
 
@@ -50,11 +51,12 @@ impl MemTable {
         }
     }
 
-    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, entry_type: EntryType) {
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, entry_type: EntryType, expires_at: u64) {
         let entry = KVEntry {
             key: key.clone(),
             value,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+            expires_at,
             entry_type,
             deleted: entry_type == EntryType::Delete,
         };
@@ -133,6 +135,7 @@ impl<'a> Iterator for SSTableIterator<'a> {
                     key: log_entry.key,
                     value: log_entry.value,
                     timestamp: log_entry.timestamp,
+                    expires_at: log_entry.expires_at,
                     entry_type: log_entry.entry_type,
                     deleted: log_entry.entry_type == EntryType::Delete,
                 }))
@@ -161,6 +164,8 @@ fn write_compressed_entry<W: io::Write>(writer: &mut W, entry: &BDBLogEntry, sha
 
     writer.write_u64::<LittleEndian>(entry.timestamp)?;
     bytes_written += 8;
+
+    bytes_written += crate::core::format::write_varint(writer, entry.expires_at)?;
 
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&[entry.entry_type as u8]);
@@ -196,6 +201,10 @@ fn read_compressed_entry<R: io::Read>(reader: &mut R, full_key: &[u8]) -> io::Re
     let non_shared = crate::core::format::read_varint(reader)? as usize;
     let value_len = crate::core::format::read_varint(reader)? as usize;
 
+    if value_len > 100 * 1024 * 1024 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "value_len suspiciously large"));
+    }
+
     let mut key_suffix = vec![0u8; non_shared];
     reader.read_exact(&mut key_suffix)?;
 
@@ -210,6 +219,7 @@ fn read_compressed_entry<R: io::Read>(reader: &mut R, full_key: &[u8]) -> io::Re
     reader.read_exact(&mut value)?;
 
     let timestamp = reader.read_u64::<LittleEndian>()?;
+    let expires_at = crate::core::format::read_varint(reader).unwrap_or(0);
     let read_crc = reader.read_u32::<LittleEndian>()?;
 
     let mut hasher = crc32fast::Hasher::new();
@@ -236,6 +246,7 @@ fn read_compressed_entry<R: io::Read>(reader: &mut R, full_key: &[u8]) -> io::Re
         key,
         value,
         timestamp,
+        expires_at,
         entry_crc: read_crc,
     })
 }
@@ -381,6 +392,7 @@ impl<'a> Iterator for MergeIterator<'a> {
     type Item = io::Result<KVEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
         while let Some(mut node) = self.heap.pop() {
             let key = node.entry.key.clone();
 
@@ -410,10 +422,10 @@ impl<'a> Iterator for MergeIterator<'a> {
 
             self.last_yielded_key = key;
 
-            if !node.entry.deleted {
+            if !node.entry.deleted && (node.entry.expires_at == 0 || node.entry.expires_at >= now) {
                 return Some(Ok(node.entry));
             }
-            // If deleted, we continue loop to find next unique key
+            // If deleted or expired, we continue loop to find next unique key
         }
         None
     }
@@ -478,6 +490,7 @@ impl SSTable {
         let mut attempts = 0;
         loop {
             let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?.as_millis();
+            let timestamp_nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
             let filename = format!("{}_{}_{}_{}.sst", 
                 match table_type {
                     TableType::History => "history",
@@ -486,7 +499,7 @@ impl SSTable {
                     TableType::LocalStore => "localstore",
                     TableType::Settings => "settings",
                 }, 
-                level, timestamp, entries.len());
+                level, timestamp, timestamp_nanos % 100000);
             let file_path = base_path.join(filename);
             
             let res = (|| {
@@ -519,6 +532,7 @@ impl SSTable {
                         key: entry.key.clone(),
                         value: entry.value.clone(),
                         timestamp: entry.timestamp,
+                        expires_at: entry.expires_at,
                         entry_crc: 0,
                     };
                     
@@ -680,6 +694,7 @@ impl SSTable {
                 key: log_entry.key,
                 value: log_entry.value,
                 timestamp: log_entry.timestamp,
+                expires_at: log_entry.expires_at,
                 entry_type: log_entry.entry_type,
                 deleted: log_entry.entry_type == EntryType::Delete,
             });
@@ -746,7 +761,12 @@ impl SSTable {
         // Load block checksums
         let mut block_checksums = Vec::new();
         let num_blocks = (footer.block_crc_offset - footer.data_offset + BDB_BLOCK_SIZE as u64 - 1) / BDB_BLOCK_SIZE as u64;
-        let mut crc_cursor = io::Cursor::new(&mmap[footer.block_crc_offset as usize..(mmap.len() - BDB_FOOTER_SIZE)]);
+        let block_crc_offset = footer.block_crc_offset as usize;
+        let footer_start = mmap.len() - BDB_FOOTER_SIZE;
+        if block_crc_offset > footer_start {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Corrupted SSTable footer CRC offset"));
+        }
+        let mut crc_cursor = io::Cursor::new(&mmap[block_crc_offset..footer_start]);
         for _ in 0..num_blocks {
             if let Ok(crc) = crc_cursor.read_u32::<LittleEndian>() {
                 block_checksums.push(crc);
@@ -916,7 +936,7 @@ impl LSMTree {
                     if in_batch {
                         for (k, v, t) in batch_entries.drain(..) {
                             let shard = (k.first().cloned().unwrap_or(0) % 16) as usize;
-                            memtable[shard].write().put(k, v, t);
+                            memtable[shard].write().put(k, v, t, 0);
                         }
                         in_batch = false;
                     }
@@ -926,7 +946,7 @@ impl LSMTree {
                         batch_entries.push((entry.key, entry.value, entry.entry_type));
                     } else {
                         let shard = (entry.key.first().cloned().unwrap_or(0) % 16) as usize;
-                        memtable[shard].write().put(entry.key, entry.value, entry.entry_type);
+                        memtable[shard].write().put(entry.key, entry.value, entry.entry_type, entry.expires_at);
                     }
                 }
             }
@@ -1031,10 +1051,54 @@ impl LSMTree {
 
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
         let mut mem = self.inner.memtable[shard].write();
-        mem.put(key, stored_value, entry_type);
+        mem.put(key, stored_value, entry_type, 0);
         
         if mem.should_flush() {
             drop(mem); // unlock
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn increment(&self, key: Vec<u8>, delta: i64) -> io::Result<()> {
+        let value = delta.to_le_bytes().to_vec();
+        let mut wal_entry = BDBLogEntry::new(EntryType::Increment, key.clone(), value.clone());
+        self.inner.wal.write().log(&mut wal_entry)?;
+
+        let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
+        let mut mem = self.inner.memtable[shard].write();
+        mem.put(key, value, EntryType::Increment, 0);
+
+        if mem.should_flush() {
+            drop(mem);
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn put_with_ttl(&self, key: Vec<u8>, value: Vec<u8>, ttl_ms: u64) -> io::Result<()> {
+        let expires_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 + ttl_ms;
+
+        let value_size = value.len();
+        let mut entry_type = EntryType::Insert;
+        let mut stored_value = value.clone();
+
+        if value_size > 65536 {
+            if let Ok(ptr) = self.inner.blob_log.put(&key, &value) {
+                entry_type = EntryType::BlobIndex;
+                stored_value = ptr.encode();
+            }
+        }
+
+        let mut wal_entry = BDBLogEntry::with_ttl(entry_type, key.clone(), stored_value.clone(), expires_at);
+        self.inner.wal.write().log(&mut wal_entry)?;
+
+        let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
+        let mut mem = self.inner.memtable[shard].write();
+        mem.put(key, stored_value, entry_type, expires_at);
+
+        if mem.should_flush() {
+            drop(mem);
             self.flush()?;
         }
         Ok(())
@@ -1072,7 +1136,7 @@ impl LSMTree {
         for (k, v, t) in batch.entries {
             let shard = (k.first().cloned().unwrap_or(0) % 16) as usize;
             let mut mem = self.inner.memtable[shard].write();
-            mem.put(k, v, t);
+            mem.put(k, v, t, 0);
             if mem.should_flush() {
                 needs_flush = true;
             }
@@ -1124,6 +1188,11 @@ impl LSMTree {
             return None;
         }
 
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        if entry.expires_at > 0 && entry.expires_at < now {
+            return None;
+        }
+
         if entry.entry_type == EntryType::BlobIndex {
             if let Some(ptr) = BlobPointer::decode(&entry.value) {
                 if let Ok(val) = self.inner.blob_log.get(&ptr) {
@@ -1140,7 +1209,7 @@ impl LSMTree {
 
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
         let mut mem = self.inner.memtable[shard].write();
-        mem.put(key, Vec::new(), EntryType::Delete);
+        mem.put(key, Vec::new(), EntryType::Delete, 0);
 
         if mem.should_flush() {
             drop(mem);
@@ -1204,6 +1273,11 @@ impl LSMTree {
             for (key, entry) in range {
                 if !prefix.is_empty() && !key.starts_with(prefix) { break; }
                 let mut deref_entry = entry.clone();
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                if deref_entry.expires_at > 0 && deref_entry.expires_at < now {
+                    results.insert(key.clone(), None);
+                    continue;
+                }
                 if deref_entry.entry_type == EntryType::BlobIndex && !deref_entry.deleted {
                     if let Some(ptr) = BlobPointer::decode(&deref_entry.value) {
                         if let Ok(val) = self.inner.blob_log.get(&ptr) {
@@ -1465,12 +1539,26 @@ impl LSMTreeInner {
     }
 
     fn get_raw(&self, key: &[u8]) -> Option<KVEntry> {
+        let mut delta_sum: i64 = 0;
+        let mut has_increments = false;
+        let mut newest_entry: Option<KVEntry> = None;
+
         // 1. MemTable
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
-        let entry_opt = self.memtable[shard].read().get(key);
-
-        if let Some(entry) = entry_opt {
-            return Some(entry);
+        if let Some(entry) = self.memtable[shard].read().get(key) {
+            if entry.entry_type == EntryType::Increment {
+                has_increments = true;
+                if entry.value.len() == 8 {
+                    let mut arr = [0u8; 8];
+                    arr.copy_from_slice(&entry.value);
+                    delta_sum = delta_sum.wrapping_add(i64::from_le_bytes(arr));
+                }
+                if newest_entry.is_none() {
+                    newest_entry = Some(entry.clone());
+                }
+            } else {
+                return Some(entry);
+            }
         }
 
         // 2. Levels (0 to 9)
@@ -1478,9 +1566,47 @@ impl LSMTreeInner {
             let sstables = level.read();
             for sstable in sstables.iter().rev() {
                 if let Some(entry) = sstable.get(key) {
-                    return Some(entry);
+                    if entry.entry_type == EntryType::Increment {
+                        has_increments = true;
+                        if entry.value.len() == 8 {
+                            let mut arr = [0u8; 8];
+                            arr.copy_from_slice(&entry.value);
+                            delta_sum = delta_sum.wrapping_add(i64::from_le_bytes(arr));
+                        }
+                        if newest_entry.is_none() {
+                            newest_entry = Some(entry.clone());
+                        }
+                    } else {
+                        // Found a base entry.
+                        if has_increments {
+                            let mut final_entry = newest_entry.unwrap();
+                            let base_val = if entry.value.len() == 8 {
+                                let mut arr = [0u8; 8];
+                                arr.copy_from_slice(&entry.value);
+                                i64::from_le_bytes(arr)
+                            } else {
+                                0
+                            };
+                            let sum = base_val.wrapping_add(delta_sum);
+                            final_entry.value = sum.to_le_bytes().to_vec();
+                            final_entry.entry_type = EntryType::Insert;
+                            final_entry.deleted = false;
+                            return Some(final_entry);
+                        } else {
+                            return Some(entry);
+                        }
+                    }
                 }
             }
+        }
+
+        // If we only found increments but no base, treat base as 0
+        if has_increments {
+            let mut final_entry = newest_entry.unwrap();
+            final_entry.value = delta_sum.to_le_bytes().to_vec();
+            final_entry.entry_type = EntryType::Insert;
+            final_entry.deleted = false;
+            return Some(final_entry);
         }
 
         None
@@ -1498,7 +1624,7 @@ impl LSMTreeInner {
         for (k, v, _t) in batch.entries {
             let shard = (k.first().cloned().unwrap_or(0) % 16) as usize;
             let mut mem = self.memtable[shard].write();
-            mem.put(k, v, entry_type);
+            mem.put(k, v, entry_type, 0);
         }
         Ok(())
     }
@@ -1540,9 +1666,10 @@ impl LSMTreeInner {
 
             if let Some(key) = min_key {
                 let mut best_entry: Option<KVEntry> = None;
+                let mut delta_sum: i64 = 0;
+                let mut has_increments = false;
 
                 for iter in iterators.iter_mut() {
-                    // Check if the next item belongs to `min_key`
                     let should_consume = if let Some(Ok(peeked)) = iter.peek() {
                         peeked.key == key
                     } else {
@@ -1551,16 +1678,47 @@ impl LSMTreeInner {
 
                     if should_consume {
                         if let Some(Ok(entry)) = iter.next() {
-                            if best_entry.is_none() || entry.timestamp > best_entry.as_ref().unwrap().timestamp {
-                                best_entry = Some(entry);
+                            if entry.entry_type == EntryType::Increment {
+                                has_increments = true;
+                                if entry.value.len() == 8 {
+                                    let mut arr = [0u8; 8];
+                                    arr.copy_from_slice(&entry.value);
+                                    let delta = i64::from_le_bytes(arr);
+                                    delta_sum = delta_sum.wrapping_add(delta);
+                                }
+                                if best_entry.is_none() || entry.timestamp > best_entry.as_ref().unwrap().timestamp {
+                                    best_entry = Some(entry.clone());
+                                }
+                            } else {
+                                if best_entry.is_none() || entry.timestamp > best_entry.as_ref().unwrap().timestamp {
+                                    best_entry = Some(entry);
+                                }
                             }
                         }
                     }
                 }
 
-                if let Some(entry) = best_entry {
-                    if !is_final_level || !entry.deleted {
-                        merged_entries.insert(key, entry);
+                if let Some(mut entry) = best_entry {
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                    if entry.expires_at > 0 && entry.expires_at < now {
+                        // Skip expired
+                    } else {
+                        if has_increments {
+                            let base_val = if entry.entry_type != EntryType::Increment && entry.value.len() == 8 {
+                                let mut arr = [0u8; 8];
+                                arr.copy_from_slice(&entry.value);
+                                i64::from_le_bytes(arr)
+                            } else {
+                                0
+                            };
+                            let final_val = base_val.wrapping_add(delta_sum);
+                            entry.value = final_val.to_le_bytes().to_vec();
+                            entry.entry_type = EntryType::Insert;
+                        }
+
+                        if !is_final_level || !entry.deleted {
+                            merged_entries.insert(key, entry);
+                        }
                     }
                 }
             } else {
