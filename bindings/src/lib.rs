@@ -14,13 +14,22 @@ use crate::core::modes::{ModeSwitcher, CurrentMode};
 use crate::core::config::BrowserDBConfig;
 
 pub mod types {
-    pub use super::{HistoryEntry, CookieEntry, CacheEntry, LocalStoreEntry, SettingEntry};
+    pub use super::{HistoryEntry, CookieEntry, CacheEntry, LocalStoreEntry, SettingEntry, BookmarkEntry};
 }
 
 pub mod cookie_flags {
     pub const NONE: u8 = 0;
     pub const SECURE: u8 = 1;
     pub const HTTPONLY: u8 = 2;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookmarkEntry {
+    pub url_hash: u128,
+    pub url: String,
+    pub title: String,
+    pub folder: String,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +96,7 @@ pub struct Container {
 
 impl Container {
     pub fn history(&self) -> HistoryTable<'_> { HistoryTable { container: self } }
+    pub fn bookmarks(&self) -> BookmarksTable<'_> { BookmarksTable { container: self } }
     pub fn cookies(&self) -> CookiesTable<'_> { CookiesTable { container: self } }
     pub fn cache(&self) -> CacheTable<'_> { CacheTable { container: self } }
     pub fn localstore(&self) -> LocalStoreTable<'_> { LocalStoreTable { container: self } }
@@ -103,6 +113,7 @@ impl Container {
         match &*current_mode {
             CurrentMode::Persistent(pm) => {
                 pm.history.clear()?;
+                pm.bookmarks.clear()?;
                 pm.cookies.clear()?;
                 pm.cache.clear()?;
                 pm.localstore.clear()?;
@@ -117,6 +128,7 @@ impl Container {
 
     pub fn stats(&self) -> Result<DatabaseStats, Box<dyn std::error::Error>> {
         let history = self.history().count()? as u64;
+        let bookmarks = self.bookmarks().count()? as u64;
         let cookies = self.cookies().count()? as u64;
         let cache = self.cache().count()? as u64;
         let localstore = self.localstore().count()? as u64;
@@ -132,8 +144,9 @@ impl Container {
         }
 
         Ok(DatabaseStats {
-            total_entries: history + cookies + cache + localstore + settings,
+            total_entries: history + bookmarks + cookies + cache + localstore + settings,
             history_entries: history,
+            bookmark_entries: bookmarks,
             cookie_entries: cookies,
             cache_entries: cache,
             localstore_entries: localstore,
@@ -263,6 +276,9 @@ impl BrowserDB {
     pub fn history(&self) -> HistoryTable<'_> {
         HistoryTable { container: &self.default_container }
     }
+    pub fn bookmarks(&self) -> BookmarksTable<'_> {
+        BookmarksTable { container: &self.default_container }
+    }
     pub fn cookies(&self) -> CookiesTable<'_> {
         CookiesTable { container: &self.default_container }
     }
@@ -293,6 +309,7 @@ impl BrowserDB {
 pub struct DatabaseStats {
     pub total_entries: u64,
     pub history_entries: u64,
+    pub bookmark_entries: u64,
     pub cookie_entries: u64,
     pub cache_entries: u64,
     pub localstore_entries: u64,
@@ -386,6 +403,53 @@ impl<'a> HistoryTable<'a> {
     }
 }
 
+pub struct BookmarksTable<'a> { container: &'a Container }
+impl<'a> BookmarksTable<'a> {
+    pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => Ok(pm.bookmarks.all_entries().len()),
+            CurrentMode::Ultra(um) => Ok(um.bookmarks.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
+        }
+    }
+
+    pub fn insert(&self, entry: &BookmarkEntry) -> Result<(), Box<dyn std::error::Error>> {
+        let key = bincode::serialize(&entry.url_hash)?;
+        let value = bincode::serialize(entry)?;
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.bookmarks.put(key, value)?,
+            CurrentMode::Ultra(um) => um.bookmarks.put(key, value),
+        }
+        Ok(())
+    }
+
+    pub fn delete(&self, url_hash: u128) -> Result<(), Box<dyn std::error::Error>> {
+        let key = bincode::serialize(&url_hash)?;
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.bookmarks.delete(key)?,
+            CurrentMode::Ultra(um) => um.bookmarks.delete(&key),
+        }
+        Ok(())
+    }
+
+    pub fn get_all(&self) -> Result<Vec<BookmarkEntry>, Box<dyn std::error::Error>> {
+        let current_mode = self.container.switcher.current_mode.read();
+        let all_entries: Vec<(Vec<u8>, Vec<u8>)> = match &*current_mode {
+            CurrentMode::Persistent(pm) => {
+                pm.bookmarks.all_entries().into_iter().map(|e| (e.key, e.value)).collect()
+            }
+            CurrentMode::Ultra(um) => um.bookmarks.all_entries(),
+        };
+
+        let mut bookmarks = Vec::with_capacity(all_entries.len());
+        for (_key, value) in all_entries {
+            if let Ok(entry) = bincode::deserialize::<BookmarkEntry>(&value) {
+                bookmarks.push(entry);
+            }
+        }
+        Ok(bookmarks)
+    }
+}
+
 pub struct CookiesTable<'a> { container: &'a Container }
 impl<'a> CookiesTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
@@ -401,6 +465,15 @@ impl<'a> CookiesTable<'a> {
         match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.cookies.put(key, value)?,
             CurrentMode::Ultra(um) => um.cookies.put(key, value),
+        }
+        Ok(())
+    }
+
+    pub fn delete(&self, domain_hash: u128, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let key = bincode::serialize(&(domain_hash, name))?;
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.cookies.delete(key)?,
+            CurrentMode::Ultra(um) => um.cookies.delete(&key),
         }
         Ok(())
     }

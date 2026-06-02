@@ -112,6 +112,7 @@ impl UltraTable {
 pub struct PersistentMode {
     pub path: PathBuf,
     pub history: LSMTree,
+    pub bookmarks: LSMTree,
     pub cookies: LSMTree,
     pub cache: LSMTree,
     pub localstore: LSMTree,
@@ -121,6 +122,7 @@ pub struct PersistentMode {
 impl PersistentMode {
     pub fn has_unsynced_data(&self) -> bool {
         self.history.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
+        self.bookmarks.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
         self.cookies.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
         self.cache.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
         self.localstore.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
@@ -141,6 +143,7 @@ impl PersistentMode {
         Ok(Self {
             path: path.to_path_buf(),
             history: LSMTree::new_with_indices(path, TableType::History, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::History).unwrap_or_default())?,
+            bookmarks: LSMTree::new_with_indices(path, TableType::Bookmarks, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::Bookmarks).unwrap_or_default())?,
             cookies: LSMTree::new_with_indices(path, TableType::Cookies, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::Cookies).unwrap_or_default())?,
             cache: LSMTree::new_with_indices(path, TableType::Cache, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::Cache).unwrap_or_default())?,
             localstore: LSMTree::new_with_indices(path, TableType::LocalStore, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::LocalStore).unwrap_or_default())?,
@@ -151,6 +154,7 @@ impl PersistentMode {
 
 pub struct UltraMode {
     pub history: UltraTable,
+    pub bookmarks: UltraTable,
     pub cookies: UltraTable,
     pub cache: UltraTable,
     pub localstore: UltraTable,
@@ -161,6 +165,7 @@ impl Default for UltraMode {
     fn default() -> Self {
         Self {
             history: UltraTable::new(),
+            bookmarks: UltraTable::new(),
             cookies: UltraTable::new(),
             cache: UltraTable::new(),
             localstore: UltraTable::new(),
@@ -176,6 +181,7 @@ impl UltraMode {
 
     pub fn clear(&self) {
         self.history.clear();
+        self.bookmarks.clear();
         self.cookies.clear();
         self.cache.clear();
         self.localstore.clear();
@@ -231,6 +237,7 @@ impl ModeSwitcher {
         match (&*current, &new_instance) {
             (CurrentMode::Persistent(old_pm), CurrentMode::Ultra(new_um)) => {
                 for entry in old_pm.history.all_entries() { new_um.history.put(entry.key, entry.value); }
+                for entry in old_pm.bookmarks.all_entries() { new_um.bookmarks.put(entry.key, entry.value); }
                 for entry in old_pm.cookies.all_entries() { new_um.cookies.put(entry.key, entry.value); }
                 for entry in old_pm.cache.all_entries() { new_um.cache.put(entry.key, entry.value); }
                 for entry in old_pm.localstore.all_entries() { new_um.localstore.put(entry.key, entry.value); }
@@ -238,6 +245,7 @@ impl ModeSwitcher {
             },
             (CurrentMode::Ultra(old_um), CurrentMode::Persistent(new_pm)) => {
                 for (k, v) in old_um.history.all_entries() { new_pm.history.put(k, v).map_err(ModeSwitchError::IoError)?; }
+                for (k, v) in old_um.bookmarks.all_entries() { new_pm.bookmarks.put(k, v).map_err(ModeSwitchError::IoError)?; }
                 for (k, v) in old_um.cookies.all_entries() { new_pm.cookies.put(k, v).map_err(ModeSwitchError::IoError)?; }
                 for (k, v) in old_um.cache.all_entries() { new_pm.cache.put(k, v).map_err(ModeSwitchError::IoError)?; }
                 for (k, v) in old_um.localstore.all_entries() { new_pm.localstore.put(k, v).map_err(ModeSwitchError::IoError)?; }
