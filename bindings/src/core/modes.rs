@@ -40,8 +40,10 @@ pub struct ModeConfig {
     pub ext_config: BrowserDBConfig,
 }
 
+pub type UltraEntry = (Vec<u8>, u64);
+
 pub struct UltraTable {
-    pub data: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
+    pub data: RwLock<HashMap<Vec<u8>, UltraEntry>>,
     pub entry_count: std::sync::atomic::AtomicUsize,
 }
 
@@ -54,6 +56,14 @@ impl Default for UltraTable {
     }
 }
 
+#[inline]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 impl UltraTable {
     pub fn new() -> Self {
         Self::default()
@@ -64,14 +74,23 @@ impl UltraTable {
         self.entry_count.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
-    pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
-        if self.data.write().insert(key, value).is_none() {
+    /// Insert or replace a key/value. `expires_at` is an absolute UNIX
+    /// timestamp in milliseconds; `0` means the entry never expires.
+    /// Enforced lazily on read; use [`UltraTable::purge_expired`] to reclaim
+    /// memory from expired entries.
+    pub fn put(&self, key: Vec<u8>, value: Vec<u8>, expires_at: u64) {
+        if self.data.write().insert(key, (value, expires_at)).is_none() {
             self.entry_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.data.read().get(key).cloned()
+        let data = self.data.read();
+        let (value, expires_at) = data.get(key)?.clone();
+        if expires_at != 0 && expires_at < now_ms() {
+            return None;
+        }
+        Some(value)
     }
 
     pub fn delete(&self, key: &[u8]) {
@@ -85,7 +104,7 @@ impl UltraTable {
         let entry = data.entry(key.to_vec());
         match entry {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
-                let value = occupied.get_mut();
+                let (value, expires_at) = occupied.get_mut();
                 if value.len() == 8 {
                     let mut arr = [0u8; 8];
                     arr.copy_from_slice(value);
@@ -96,16 +115,43 @@ impl UltraTable {
                     value.clear();
                     value.extend_from_slice(&delta.to_le_bytes());
                 }
+                let _ = expires_at;
             }
             std::collections::hash_map::Entry::Vacant(vacant) => {
-                vacant.insert(delta.to_le_bytes().to_vec());
+                vacant.insert((delta.to_le_bytes().to_vec(), 0));
                 self.entry_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
     }
 
+    /// Snapshot of all non-expired entries. Expired entries are filtered
+    /// out but not removed from the table; call [`UltraTable::purge_expired`]
+    /// to actually reclaim them.
     pub fn all_entries(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        self.data.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        let now = now_ms();
+        self.data
+            .read()
+            .iter()
+            .filter(|(_, (_, expires_at))| *expires_at == 0 || *expires_at >= now)
+            .map(|(k, (v, _)): (&Vec<u8>, &UltraEntry)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Remove all expired entries and return the number of entries purged.
+    /// Use this to free memory in long-lived Ultra mode sessions; no
+    /// background thread is spawned (by design — Ultra mode avoids
+    /// background work).
+    pub fn purge_expired(&self) -> usize {
+        let now = now_ms();
+        let mut data = self.data.write();
+        let before = data.len();
+        data.retain(|_, (_, expires_at)| *expires_at == 0 || *expires_at >= now);
+        let purged = before - data.len();
+        drop(data);
+        if purged > 0 {
+            self.entry_count.fetch_sub(purged, std::sync::atomic::Ordering::SeqCst);
+        }
+        purged
     }
 }
 
@@ -187,6 +233,17 @@ impl UltraMode {
         self.localstore.clear();
         self.settings.clear();
     }
+
+    /// Sweep expired entries from every Ultra table. Returns the total
+    /// number of entries purged across all tables.
+    pub fn purge_expired_all(&self) -> usize {
+        self.history.purge_expired()
+            + self.bookmarks.purge_expired()
+            + self.cookies.purge_expired()
+            + self.cache.purge_expired()
+            + self.localstore.purge_expired()
+            + self.settings.purge_expired()
+    }
 }
 
 pub enum CurrentMode {
@@ -236,12 +293,12 @@ impl ModeSwitcher {
         // Data Migration
         match (&*current, &new_instance) {
             (CurrentMode::Persistent(old_pm), CurrentMode::Ultra(new_um)) => {
-                for entry in old_pm.history.all_entries() { new_um.history.put(entry.key, entry.value); }
-                for entry in old_pm.bookmarks.all_entries() { new_um.bookmarks.put(entry.key, entry.value); }
-                for entry in old_pm.cookies.all_entries() { new_um.cookies.put(entry.key, entry.value); }
-                for entry in old_pm.cache.all_entries() { new_um.cache.put(entry.key, entry.value); }
-                for entry in old_pm.localstore.all_entries() { new_um.localstore.put(entry.key, entry.value); }
-                for entry in old_pm.settings.all_entries() { new_um.settings.put(entry.key, entry.value); }
+                for entry in old_pm.history.all_entries() { new_um.history.put(entry.key, entry.value, 0); }
+                for entry in old_pm.bookmarks.all_entries() { new_um.bookmarks.put(entry.key, entry.value, 0); }
+                for entry in old_pm.cookies.all_entries() { new_um.cookies.put(entry.key, entry.value, 0); }
+                for entry in old_pm.cache.all_entries() { new_um.cache.put(entry.key, entry.value, 0); }
+                for entry in old_pm.localstore.all_entries() { new_um.localstore.put(entry.key, entry.value, 0); }
+                for entry in old_pm.settings.all_entries() { new_um.settings.put(entry.key, entry.value, 0); }
             },
             (CurrentMode::Ultra(old_um), CurrentMode::Persistent(new_pm)) => {
                 for (k, v) in old_um.history.all_entries() { new_pm.history.put(k, v).map_err(ModeSwitchError::IoError)?; }
