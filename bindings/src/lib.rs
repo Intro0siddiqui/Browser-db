@@ -254,8 +254,19 @@ impl BrowserDB {
         let ls_indices = vec![
             crate::core::lsm_tree::IndexDefinition {
                 name: "value".to_string(),
+                field_name: "value".to_string(),
                 extractor: Arc::new(LocalStoreTable::extract_value_index),
-            }
+            },
+            crate::core::lsm_tree::IndexDefinition {
+                name: "key".to_string(),
+                field_name: "key".to_string(),
+                extractor: Arc::new(LocalStoreTable::extract_key_index),
+            },
+            crate::core::lsm_tree::IndexDefinition {
+                name: "origin_hash".to_string(),
+                field_name: "origin_hash".to_string(),
+                extractor: Arc::new(LocalStoreTable::extract_origin_index),
+            },
         ];
         index_defs.insert(crate::core::format::TableType::LocalStore, ls_indices);
 
@@ -323,7 +334,7 @@ impl<'a> HistoryTable<'a> {
     pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
         match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => Ok(pm.history.all_entries().len()),
-            CurrentMode::Ultra(um) => Ok(um.history.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
+            CurrentMode::Ultra(um) => Ok(um.history.all_entries().len()),
         }
     }
 
@@ -333,20 +344,31 @@ impl<'a> HistoryTable<'a> {
         
         match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.history.put(key, value)?,
-            CurrentMode::Ultra(um) => um.history.put(key, value),
+            CurrentMode::Ultra(um) => um.history.put(key, value, 0),
         }
         Ok(())
     }
 
     /// Inserts a history entry with a Time-To-Live.
-    /// Note: TTL is currently ignored in `CurrentMode::Ultra`.
+    ///
+    /// In `CurrentMode::Persistent`, the entry's expiry is stored and
+    /// enforced during reads, scans, and compaction.
+    /// In `CurrentMode::Ultra`, expiry is enforced lazily on read; a
+    /// purge pass is triggered after the write to reclaim memory.
     pub fn insert_with_ttl(&self, entry: &HistoryEntry, ttl_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
         let key = bincode::serialize(&entry.url_hash)?;
         let value = bincode::serialize(entry)?;
 
         match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.history.put_with_ttl(key, value, ttl_ms)?,
-            CurrentMode::Ultra(um) => um.history.put(key, value), // UltraMode doesn't natively enforce background TTL out-of-box yet, we just do put for now
+            CurrentMode::Ultra(um) => {
+                let expires_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64 + ttl_ms;
+                um.history.put(key, value, expires_at);
+                um.purge_expired_all();
+            }
         }
         Ok(())
     }
@@ -375,8 +397,46 @@ impl<'a> HistoryTable<'a> {
         }
     }
 
-    pub fn hot_search(&self, _query: &str, _limit: usize) -> Result<Vec<HistoryEntry>, Box<dyn std::error::Error>> {
-        Ok(Vec::new())
+    /// Search the history table for entries whose `url` or `title` contain
+    /// `query` (case-insensitive substring), ranked by "hotness":
+    ///
+    ///   1. Higher `visit_count` first.
+    ///   2. Tiebreak: more recent `timestamp` first.
+    ///
+    /// Returns at most `limit` entries. An empty `query` matches every
+    /// entry and returns them all ranked.
+    pub fn hot_search(&self, query: &str, limit: usize) -> Result<Vec<HistoryEntry>, Box<dyn std::error::Error>> {
+        let needle = query.to_lowercase();
+
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.history
+                .all_entries()
+                .into_iter()
+                .map(|e| (e.key, e.value))
+                .collect(),
+            CurrentMode::Ultra(um) => um.history.all_entries(),
+        };
+
+        let mut matched: Vec<HistoryEntry> = Vec::new();
+        for (_key, value) in entries {
+            if let Ok(entry) = bincode::deserialize::<HistoryEntry>(&value) {
+                if needle.is_empty()
+                    || entry.url.to_lowercase().contains(&needle)
+                    || entry.title.to_lowercase().contains(&needle)
+                {
+                    matched.push(entry);
+                }
+            }
+        }
+
+        matched.sort_by(|a, b| {
+            b.visit_count
+                .cmp(&a.visit_count)
+                .then(b.timestamp.cmp(&a.timestamp))
+        });
+
+        matched.truncate(limit);
+        Ok(matched)
     }
 
     pub fn wipe_domain(&self, domain: &str) -> Result<usize, Box<dyn std::error::Error>> {
@@ -417,7 +477,7 @@ impl<'a> BookmarksTable<'a> {
         let value = bincode::serialize(entry)?;
         match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.bookmarks.put(key, value)?,
-            CurrentMode::Ultra(um) => um.bookmarks.put(key, value),
+            CurrentMode::Ultra(um) => um.bookmarks.put(key, value, 0),
         }
         Ok(())
     }
@@ -464,7 +524,7 @@ impl<'a> CookiesTable<'a> {
         let value = bincode::serialize(entry)?;
         match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.cookies.put(key, value)?,
-            CurrentMode::Ultra(um) => um.cookies.put(key, value),
+            CurrentMode::Ultra(um) => um.cookies.put(key, value, 0),
         }
         Ok(())
     }
@@ -511,7 +571,7 @@ impl<'a> CacheTable<'a> {
         let value = bincode::serialize(entry)?;
         match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.cache.put(key, value)?,
-            CurrentMode::Ultra(um) => um.cache.put(key, value),
+            CurrentMode::Ultra(um) => um.cache.put(key, value, 0),
         }
         Ok(())
     }
@@ -548,10 +608,10 @@ impl<'a> LocalStoreTable<'a> {
         match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.localstore.put(primary_key, value)?,
             CurrentMode::Ultra(um) => {
-                um.localstore.put(primary_key.clone(), value.clone());
+                um.localstore.put(primary_key.clone(), value.clone(), 0);
                 // Ultra mode still needs manual indexing for now
                 if let Some(idx_key) = Self::extract_value_index(&primary_key, &value) {
-                    um.localstore.put(idx_key, primary_key);
+                    um.localstore.put(idx_key, primary_key, 0);
                 }
             }
         }
@@ -592,8 +652,76 @@ impl<'a> LocalStoreTable<'a> {
         }
     }
 
-    pub fn insert_with_index(&self, entry: &LocalStoreEntry, _index_fields: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-        self.insert(entry)
+    pub(crate) fn extract_key_index(_k: &[u8], v: &[u8]) -> Option<Vec<u8>> {
+        if let Ok(entry) = bincode::deserialize::<LocalStoreEntry>(v) {
+            Some(format!("idx:localstore:key:{}:{}", entry.key, entry.value).into_bytes())
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn extract_origin_index(_k: &[u8], v: &[u8]) -> Option<Vec<u8>> {
+        if let Ok(entry) = bincode::deserialize::<LocalStoreEntry>(v) {
+            Some(format!("idx:localstore:origin:{}:{}:{}", entry.origin_hash, entry.key, entry.value).into_bytes())
+        } else {
+            None
+        }
+    }
+
+    /// Insert a `LocalStoreEntry` and only build the secondary indices whose
+    /// logical field name appears in `index_fields`. Supported fields:
+    /// `"value"`, `"key"`, `"origin_hash"`. An empty slice keeps the default
+    /// behavior (build the `"value"` index). An unknown field name yields
+    /// `Err`.
+    pub fn insert_with_index(
+        &self,
+        entry: &LocalStoreEntry,
+        index_fields: &[&str],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const SUPPORTED: &[&str] = &["value", "key", "origin_hash"];
+        for f in index_fields {
+            if !SUPPORTED.contains(f) {
+                return Err(format!(
+                    "Unknown index field '{}': supported fields are {:?}",
+                    f, SUPPORTED
+                )
+                .into());
+            }
+        }
+
+        let primary_key = bincode::serialize(&(entry.origin_hash, &entry.key))?;
+        let value = bincode::serialize(entry)?;
+
+        let allowed: Option<Vec<&str>> = if index_fields.is_empty() {
+            None
+        } else {
+            Some(index_fields.to_vec())
+        };
+
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => {
+                pm.localstore.put_with_field_filter(
+                    primary_key,
+                    value,
+                    allowed.as_deref(),
+                )?;
+            }
+            CurrentMode::Ultra(um) => {
+                um.localstore.put(primary_key.clone(), value.clone(), 0);
+                for field in allowed.as_deref().unwrap_or(&["value"]) {
+                    let idx_key = match *field {
+                        "value" => Self::extract_value_index(&primary_key, &value),
+                        "key" => Self::extract_key_index(&primary_key, &value),
+                        "origin_hash" => Self::extract_origin_index(&primary_key, &value),
+                        _ => None,
+                    };
+                    if let Some(idx_key) = idx_key {
+                        um.localstore.put(idx_key, primary_key.clone(), 0);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn get_by_origin(&self, origin_hash: u128) -> Result<Vec<LocalStoreEntry>, Box<dyn std::error::Error>> {
@@ -752,7 +880,7 @@ impl<'a> SettingsTable<'a> {
         let v = value.as_bytes().to_vec();
         match &*self.container.switcher.current_mode.read() {
             CurrentMode::Persistent(pm) => pm.settings.put(k, v)?,
-            CurrentMode::Ultra(um) => um.settings.put(k, v),
+            CurrentMode::Ultra(um) => um.settings.put(k, v, 0),
         }
         Ok(())
     }

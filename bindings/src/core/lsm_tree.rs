@@ -912,6 +912,7 @@ impl SSTable {
 
 pub struct IndexDefinition {
     pub name: String,
+    pub field_name: String,
     pub extractor: Arc<dyn Fn(&[u8], &[u8]) -> Option<Vec<u8>> + Send + Sync>,
 }
 
@@ -953,6 +954,7 @@ pub struct LSMTreeInner {
 
 pub struct IndexDefinitionInternal {
     pub name: String,
+    pub field_name: String,
     pub extractor: Arc<dyn Fn(&[u8], &[u8]) -> Option<Vec<u8>> + Send + Sync>,
     pub tree: LSMTree,
 }
@@ -1069,6 +1071,7 @@ impl LSMTree {
             let idx_tree = LSMTree::new_index_tree(&idx_path, table_type, max_memtable_size / 2, config.clone())?;
             indices.push(IndexDefinitionInternal {
                 name: def.name,
+                field_name: def.field_name,
                 extractor: def.extractor,
                 tree: idx_tree,
             });
@@ -1131,9 +1134,28 @@ impl LSMTree {
     }
     
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> io::Result<()> {
+        self.put_with_field_filter(key, value, None)
+    }
+
+    /// Write `key`/`value` to the tree, building only those write-side
+    /// indices whose `field_name` is in `allowed_fields`. Pass `None` to
+    /// build every registered index (the default behavior of [`put`]).
+    pub fn put_with_field_filter(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        allowed_fields: Option<&[&str]>,
+    ) -> io::Result<()> {
         // Write-Side Indexing
         if !self.inner.is_index {
             for idx in &self.inner.indices {
+                let skip = match allowed_fields {
+                    Some(fields) => !fields.contains(&idx.field_name.as_str()),
+                    None => false,
+                };
+                if skip {
+                    continue;
+                }
                 if let Some(idx_key) = (idx.extractor)(&key, &value) {
                     idx.tree.put(idx_key, key.clone())?;
                 }
@@ -1153,7 +1175,7 @@ impl LSMTree {
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
         let mut mem = self.inner.memtable[shard].write();
         mem.put(key, stored_value, entry_type, 0);
-        
+
         if mem.should_flush() {
             drop(mem); // unlock
             self.flush()?;
