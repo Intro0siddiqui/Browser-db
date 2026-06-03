@@ -10,10 +10,6 @@ repository = "https://github.com/browserdb/browserdb"
 homepage = "https://browserdb.dev"
 
 [build]
-# Zig 配置
-zig_version = "0.13.0"
-zig_optimize = "ReleaseSafe"
-
 # Rust 配置  
 rust_version = "1.75"
 rust_features = ["performance", "verbose_logging"]
