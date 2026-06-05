@@ -318,12 +318,10 @@ pub extern "C" fn browserdb_settings_remove(
 }
 
 pub(crate) fn calculate_hash(s: &str) -> u128 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut s1 = DefaultHasher::new();
-    s.hash(&mut s1);
-    let mut s2 = DefaultHasher::new();
-    "salt".hash(&mut s2);
-    s.hash(&mut s2);
-    ((s1.finish() as u128) << 64) | (s2.finish() as u128)
+    let mut hash: u128 = 0x6c62272e07bb014262b821756295c58d;
+    for byte in s.bytes() {
+        hash = hash ^ (byte as u128);
+        hash = hash.wrapping_mul(0x1000000000000000000013B);
+    }
+    hash
 }
