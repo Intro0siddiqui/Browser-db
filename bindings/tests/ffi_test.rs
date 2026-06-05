@@ -19,14 +19,12 @@ fn test_ffi_lifecycle() {
     // Manual hash calculation for the test (matches ffi.rs)
     let url_str = "https://example.com";
     let url_hash = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut s1 = DefaultHasher::new();
-        url_str.hash(&mut s1);
-        let mut s2 = DefaultHasher::new();
-        "salt".hash(&mut s2);
-        url_str.hash(&mut s2);
-        ((s1.finish() as u128) << 64) | (s2.finish() as u128)
+        let mut hash: u128 = 0x6c62272e07bb014262b821756295c58d;
+        for byte in url_str.bytes() {
+            hash = hash ^ (byte as u128);
+            hash = hash.wrapping_mul(0x1000000000000000000013B);
+        }
+        hash
     };
 
     let title_ptr = browserdb_history_get_title(db, (url_hash & 0xFFFFFFFFFFFFFFFF) as u64, (url_hash >> 64) as u64);
