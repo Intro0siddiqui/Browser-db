@@ -595,6 +595,7 @@ impl SSTable {
                     TableType::LocalStore => "localstore",
                     TableType::Settings => "settings",
                     TableType::Bookmarks => "bookmarks",
+                    TableType::BinaryStore => "binarystore",
                 }, 
                 level, timestamp, timestamp_nanos % 100000);
             let file_path = base_path.join(filename);
@@ -1003,6 +1004,7 @@ impl LSMTree {
             TableType::LocalStore => "localstore",
             TableType::Settings => "settings",
             TableType::Bookmarks => "bookmarks",
+            TableType::BinaryStore => "binarystore",
         }));
         let wal = WALManager::new(&wal_path)?;
 
@@ -1013,6 +1015,7 @@ impl LSMTree {
             TableType::LocalStore => "localstore",
             TableType::Settings => "settings",
             TableType::Bookmarks => "bookmarks",
+            TableType::BinaryStore => "binarystore",
         }));
         let blob_log = Arc::new(BlobLog::open(&blob_path)?);
 
@@ -1062,6 +1065,7 @@ impl LSMTree {
             TableType::LocalStore => "localstore",
             TableType::Settings => "settings",
             TableType::Bookmarks => "bookmarks",
+            TableType::BinaryStore => "binarystore",
         };
         for def in index_defs {
             let idx_path = base_path.join(format!("{}_idx_{}", table_prefix, def.name));
@@ -1086,6 +1090,7 @@ impl LSMTree {
                 TableType::LocalStore => "localstore",
                 TableType::Settings => "settings",
                 TableType::Bookmarks => "bookmarks",
+                TableType::BinaryStore => "binarystore",
             };
             
             let mut loaded_sstables: Vec<(u8, Arc<SSTable>)> = Vec::new();

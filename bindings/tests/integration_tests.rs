@@ -95,6 +95,8 @@ async fn test_cookie_operations() {
         domain_hash: 0xabcdef1234567890,
         name: "session_id".to_string(),
         value: "abc123xyz789".to_string(),
+        path: "/".to_string(),
+        domain: "example.com".to_string(),
         expiry: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

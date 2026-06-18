@@ -163,6 +163,7 @@ pub struct PersistentMode {
     pub cache: LSMTree,
     pub localstore: LSMTree,
     pub settings: LSMTree,
+    pub binarystore: LSMTree,
 }
 
 impl PersistentMode {
@@ -172,7 +173,8 @@ impl PersistentMode {
         self.cookies.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
         self.cache.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
         self.localstore.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
-        self.settings.inner.memtable.iter().any(|m| !m.read().entries.is_empty())
+        self.settings.inner.memtable.iter().any(|m| !m.read().entries.is_empty()) ||
+        self.binarystore.inner.memtable.iter().any(|m| !m.read().entries.is_empty())
     }
 
     pub fn new(path: &Path, config: &ModeConfig) -> std::io::Result<Self> {
@@ -194,6 +196,7 @@ impl PersistentMode {
             cache: LSMTree::new_with_indices(path, TableType::Cache, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::Cache).unwrap_or_default())?,
             localstore: LSMTree::new_with_indices(path, TableType::LocalStore, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::LocalStore).unwrap_or_default())?,
             settings: LSMTree::new_with_indices(path, TableType::Settings, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::Settings).unwrap_or_default())?,
+            binarystore: LSMTree::new_with_indices(path, TableType::BinaryStore, max_mem, config.ext_config.clone(), index_defs.remove(&TableType::BinaryStore).unwrap_or_default())?,
         })
     }
 }
@@ -205,6 +208,7 @@ pub struct UltraMode {
     pub cache: UltraTable,
     pub localstore: UltraTable,
     pub settings: UltraTable,
+    pub binarystore: UltraTable,
 }
 
 impl Default for UltraMode {
@@ -216,6 +220,7 @@ impl Default for UltraMode {
             cache: UltraTable::new(),
             localstore: UltraTable::new(),
             settings: UltraTable::new(),
+            binarystore: UltraTable::new(),
         }
     }
 }
@@ -232,6 +237,7 @@ impl UltraMode {
         self.cache.clear();
         self.localstore.clear();
         self.settings.clear();
+        self.binarystore.clear();
     }
 
     /// Sweep expired entries from every Ultra table. Returns the total
@@ -243,6 +249,7 @@ impl UltraMode {
             + self.cache.purge_expired()
             + self.localstore.purge_expired()
             + self.settings.purge_expired()
+            + self.binarystore.purge_expired()
     }
 }
 
@@ -299,6 +306,7 @@ impl ModeSwitcher {
                 for entry in old_pm.cache.all_entries() { new_um.cache.put(entry.key, entry.value, 0); }
                 for entry in old_pm.localstore.all_entries() { new_um.localstore.put(entry.key, entry.value, 0); }
                 for entry in old_pm.settings.all_entries() { new_um.settings.put(entry.key, entry.value, 0); }
+                for entry in old_pm.binarystore.all_entries() { new_um.binarystore.put(entry.key, entry.value, 0); }
             },
             (CurrentMode::Ultra(old_um), CurrentMode::Persistent(new_pm)) => {
                 for (k, v) in old_um.history.all_entries() { new_pm.history.put(k, v).map_err(ModeSwitchError::IoError)?; }
@@ -307,6 +315,7 @@ impl ModeSwitcher {
                 for (k, v) in old_um.cache.all_entries() { new_pm.cache.put(k, v).map_err(ModeSwitchError::IoError)?; }
                 for (k, v) in old_um.localstore.all_entries() { new_pm.localstore.put(k, v).map_err(ModeSwitchError::IoError)?; }
                 for (k, v) in old_um.settings.all_entries() { new_pm.settings.put(k, v).map_err(ModeSwitchError::IoError)?; }
+                for (k, v) in old_um.binarystore.all_entries() { new_pm.binarystore.put(k, v).map_err(ModeSwitchError::IoError)?; }
             },
             _ => {} // Same mode or unexpected transition
         }

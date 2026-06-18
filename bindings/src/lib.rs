@@ -46,6 +46,8 @@ pub struct CookieEntry {
     pub domain_hash: u128,
     pub name: String,
     pub value: String,
+    pub path: String,
+    pub domain: String,
     pub expiry: u64,
     pub flags: u8,
 }
@@ -56,6 +58,8 @@ impl CookieEntry {
             domain_hash,
             name,
             value,
+            path: String::new(),
+            domain: String::new(),
             expiry,
             flags: 0,
         }
@@ -101,6 +105,7 @@ impl Container {
     pub fn cache(&self) -> CacheTable<'_> { CacheTable { container: self } }
     pub fn localstore(&self) -> LocalStoreTable<'_> { LocalStoreTable { container: self } }
     pub fn settings(&self) -> SettingsTable<'_> { SettingsTable { container: self } }
+    pub fn binarystore(&self) -> BinaryStoreTable<'_> { BinaryStoreTable { container: self } }
 
     pub fn set_mode(&self, mode: DatabaseMode) -> Result<(), Box<dyn std::error::Error>> {
         let path = self.switcher.base_path.clone();
@@ -118,6 +123,7 @@ impl Container {
                 pm.cache.clear()?;
                 pm.localstore.clear()?;
                 pm.settings.clear()?;
+                pm.binarystore.clear()?;
             },
             CurrentMode::Ultra(um) => {
                 um.clear();
@@ -133,6 +139,7 @@ impl Container {
         let cache = self.cache().count()? as u64;
         let localstore = self.localstore().count()? as u64;
         let settings = self.settings().count()? as u64;
+        let binarystore = self.binarystore().count()? as u64;
 
         let mut disk_usage = 0;
         if let Ok(entries) = fs::read_dir(&self.switcher.base_path) {
@@ -144,13 +151,14 @@ impl Container {
         }
 
         Ok(DatabaseStats {
-            total_entries: history + bookmarks + cookies + cache + localstore + settings,
+            total_entries: history + bookmarks + cookies + cache + localstore + settings + binarystore,
             history_entries: history,
             bookmark_entries: bookmarks,
             cookie_entries: cookies,
             cache_entries: cache,
             localstore_entries: localstore,
             settings_entries: settings,
+            binarystore_entries: binarystore,
             memory_usage_mb: 0,
             disk_usage_mb: disk_usage / 1024 / 1024,
         })
@@ -302,6 +310,9 @@ impl BrowserDB {
     pub fn settings(&self) -> SettingsTable<'_> {
         SettingsTable { container: &self.default_container }
     }
+    pub fn binarystore(&self) -> BinaryStoreTable<'_> {
+        BinaryStoreTable { container: &self.default_container }
+    }
 
     pub fn set_mode(&self, mode: DatabaseMode) -> Result<(), Box<dyn std::error::Error>> {
         self.default_container.set_mode(mode)
@@ -325,6 +336,7 @@ pub struct DatabaseStats {
     pub cache_entries: u64,
     pub localstore_entries: u64,
     pub settings_entries: u64,
+    pub binarystore_entries: u64,
     pub memory_usage_mb: u64,
     pub disk_usage_mb: u64,
 }
@@ -538,6 +550,43 @@ impl<'a> CookiesTable<'a> {
         Ok(())
     }
 
+    pub fn get(&self, domain_hash: u128, name: &str) -> Result<Option<CookieEntry>, Box<dyn std::error::Error>> {
+        let key = bincode::serialize(&(domain_hash, name))?;
+        let value_opt = match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.cookies.get(&key).map(|e| e.value),
+            CurrentMode::Ultra(um) => um.cookies.get(&key),
+        };
+        if let Some(value) = value_opt {
+            let entry = bincode::deserialize(&value)?;
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_by_domain(&self, domain_hash: u128) -> Result<Vec<CookieEntry>, Box<dyn std::error::Error>> {
+        let prefix = bincode::serialize(&domain_hash)?;
+        let current_mode = self.container.switcher.current_mode.read();
+        let values: Vec<Vec<u8>> = match &*current_mode {
+            CurrentMode::Persistent(pm) => {
+                pm.cookies.scan_prefix(&prefix).into_iter().map(|e| e.value).collect()
+            },
+            CurrentMode::Ultra(um) => {
+                um.cookies.all_entries().into_iter()
+                    .filter(|(k, _)| k.starts_with(&prefix))
+                    .map(|(_, v)| v)
+                    .collect()
+            }
+        };
+        let mut cookies = Vec::with_capacity(values.len());
+        for value in values {
+            if let Ok(entry) = bincode::deserialize::<CookieEntry>(&value) {
+                cookies.push(entry);
+            }
+        }
+        Ok(cookies)
+    }
+
     pub fn get_all(&self) -> Result<Vec<CookieEntry>, Box<dyn std::error::Error>> {
         let current_mode = self.container.switcher.current_mode.read();
         let all_entries: Vec<(Vec<u8>, Vec<u8>)> = match &*current_mode {
@@ -724,6 +773,20 @@ impl<'a> LocalStoreTable<'a> {
         Ok(())
     }
 
+    pub fn get(&self, origin_hash: u128, key: &str) -> Result<Option<LocalStoreEntry>, Box<dyn std::error::Error>> {
+        let primary_key = bincode::serialize(&(origin_hash, key))?;
+        let value_opt = match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.localstore.get(&primary_key).map(|e| e.value),
+            CurrentMode::Ultra(um) => um.localstore.get(&primary_key),
+        };
+        if let Some(value) = value_opt {
+            let entry = bincode::deserialize::<LocalStoreEntry>(&value)?;
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn get_by_origin(&self, origin_hash: u128) -> Result<Vec<LocalStoreEntry>, Box<dyn std::error::Error>> {
         let prefix = bincode::serialize(&origin_hash)?;
 
@@ -864,6 +927,59 @@ impl<'q, 'a> QueryBuilder<'q, 'a> {
         };
 
         Ok(results)
+    }
+}
+
+pub struct BinaryStoreTable<'a> { container: &'a Container }
+impl<'a> BinaryStoreTable<'a> {
+    pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => Ok(pm.binarystore.all_entries().len()),
+            CurrentMode::Ultra(um) => Ok(um.binarystore.entry_count.load(std::sync::atomic::Ordering::SeqCst)),
+        }
+    }
+    pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.binarystore.put(key, value)?,
+            CurrentMode::Ultra(um) => um.binarystore.put(key, value, 0),
+        }
+        Ok(())
+    }
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        let value_opt = match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.binarystore.get(key).map(|e| e.value),
+            CurrentMode::Ultra(um) => um.binarystore.get(key),
+        };
+        Ok(value_opt)
+    }
+    pub fn delete(&self, key: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => pm.binarystore.delete(key.to_vec())?,
+            CurrentMode::Ultra(um) => um.binarystore.delete(key),
+        }
+        Ok(())
+    }
+    pub fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Box<dyn std::error::Error>> {
+        let entries = match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => {
+                pm.binarystore.scan_prefix(prefix).into_iter().map(|e| (e.key, e.value)).collect()
+            },
+            CurrentMode::Ultra(um) => {
+                um.binarystore.all_entries().into_iter()
+                    .filter(|(k, _)| k.starts_with(prefix))
+                    .collect()
+            }
+        };
+        Ok(entries)
+    }
+    pub fn all_entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Box<dyn std::error::Error>> {
+        let entries = match &*self.container.switcher.current_mode.read() {
+            CurrentMode::Persistent(pm) => {
+                pm.binarystore.all_entries().into_iter().map(|e| (e.key, e.value)).collect()
+            },
+            CurrentMode::Ultra(um) => um.binarystore.all_entries(),
+        };
+        Ok(entries)
     }
 }
 
