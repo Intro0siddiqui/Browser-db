@@ -187,6 +187,7 @@ pub struct SSTable {
     pub bloom_filter: Option<BloomFilter>,
     pub block_checksums: Vec<u32>,
     pub data_end: usize,
+    pub verify_checksums: bool,
 }
 
 pub struct SSTableIterator<'a> {
@@ -204,9 +205,11 @@ impl<'a> Iterator for SSTableIterator<'a> {
             return None;
         }
 
-        // Verify block checksum before reading entry
-        if let Err(e) = self.sstable.verify_blocks(self.offset, self.offset + 1) {
-            return Some(Err(e));
+        // Verify block checksum before reading entry (only if configured)
+        if self.sstable.verify_checksums {
+            if let Err(e) = self.sstable.verify_blocks(self.offset, self.offset + 1) {
+                return Some(Err(e));
+            }
         }
 
         let data = &self.sstable.mmap[self.offset..self.limit];
@@ -687,7 +690,7 @@ impl SSTable {
         Ok(())
     }
 
-    pub fn create(level: u8, entries: &BTreeMap<Vec<u8>, KVEntry>, base_path: &Path, table_type: TableType, rate_limit_mb: Option<f64>) -> io::Result<Self> {
+    pub fn create(level: u8, entries: &BTreeMap<Vec<u8>, KVEntry>, base_path: &Path, table_type: TableType, rate_limit_mb: Option<f64>, verify_checksums: bool) -> io::Result<Self> {
         let mut attempts = 0;
         let mut rate_limiter = rate_limit_mb.map(TokenBucket::new);
         loop {
@@ -861,6 +864,7 @@ impl SSTable {
                     bloom_filter: Some(bloom),
                     block_checksums,
                     data_end: data_end as usize,
+                    verify_checksums,
                 })
             })();
 
@@ -897,7 +901,7 @@ impl SSTable {
             return None;
         }
 
-        if self.verify_blocks(start, end).is_err() {
+        if self.verify_checksums && self.verify_blocks(start, end).is_err() {
             return None;
         }
 
@@ -957,7 +961,7 @@ impl SSTable {
         }
     }
 
-    pub fn open(file_path: PathBuf, level: u8) -> io::Result<Self> {
+    pub fn open(file_path: PathBuf, level: u8, verify_checksums: bool) -> io::Result<Self> {
         let mmap = retry_on_permission_denied(|| {
             let file = OpenOptions::new().read(true).open(&file_path)?;
             unsafe { Mmap::map(&file) }
@@ -1058,6 +1062,7 @@ impl SSTable {
             bloom_filter: Some(bloom),
             block_checksums,
             data_end: footer.block_crc_offset as usize,
+            verify_checksums,
         })
     }
 }
@@ -1272,7 +1277,7 @@ impl LSMTree {
                             if parts.len() >= 2 {
                                 if let Ok(level) = parts[1].parse::<u8>() {
                                     if level < 10 {
-                                        if let Ok(sst) = SSTable::open(path, level) {
+                                        if let Ok(sst) = SSTable::open(path, level, config.lsm_tree.verify_checksums) {
                                             loaded_sstables.push((level, Arc::new(sst)));
                                         }
                                     }
@@ -1506,7 +1511,7 @@ impl LSMTree {
         };
 
         let mut wal_entry = BDBLogEntry::new(entry_type, key.clone(), stored_value.clone());
-        self.inner.wal.write().log(&mut wal_entry)?;
+        self.inner.wal.read().log(&mut wal_entry)?;
 
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
         let mut mem = self.inner.memtable[shard].write();
@@ -1527,7 +1532,7 @@ impl LSMTree {
 
         let value = delta.to_le_bytes().to_vec();
         let mut wal_entry = BDBLogEntry::new(EntryType::Increment, key.clone(), value.clone());
-        self.inner.wal.write().log(&mut wal_entry)?;
+        self.inner.wal.read().log(&mut wal_entry)?;
 
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
         let mut mem = self.inner.memtable[shard].write();
@@ -1569,7 +1574,7 @@ impl LSMTree {
         }
 
         let mut wal_entry = BDBLogEntry::with_ttl(entry_type, key.clone(), stored_value.clone(), expires_at);
-        self.inner.wal.write().log(&mut wal_entry)?;
+        self.inner.wal.read().log(&mut wal_entry)?;
 
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
         let mut mem = self.inner.memtable[shard].write();
@@ -1696,7 +1701,7 @@ impl LSMTree {
         self.inner.last_active_time.store(now_time, AtomicOrdering::Relaxed);
 
         let mut wal_entry = BDBLogEntry::new(EntryType::Delete, key.clone(), Vec::new());
-        self.inner.wal.write().log(&mut wal_entry)?;
+        self.inner.wal.read().log(&mut wal_entry)?;
 
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
         let mut mem = self.inner.memtable[shard].write();
@@ -1856,7 +1861,7 @@ impl LSMTree {
         if all_entries.is_empty() { return Ok(()); }
         
         // Create SSTable (Level 0)
-        let sstable = Arc::new(SSTable::create(0, &all_entries, &self.inner.base_path, self.inner.table_type, None)?);
+        let sstable = Arc::new(SSTable::create(0, &all_entries, &self.inner.base_path, self.inner.table_type, None, self.inner.config.lsm_tree.verify_checksums)?);
         
         // Add to Level 0
         {
@@ -2226,7 +2231,7 @@ impl LSMTreeInner {
         } else {
             Some(10.0)
         };
-        let new_sstable = Arc::new(SSTable::create(level, &merged_entries, &self.base_path, self.table_type, rate_limit)?);
+        let new_sstable = Arc::new(SSTable::create(level, &merged_entries, &self.base_path, self.table_type, rate_limit, self.config.lsm_tree.verify_checksums)?);
 
         // Note: SSTable file removal is now handled in `run_compaction_cascade`
         // after removing the table entries from `self.levels` to prevent locking

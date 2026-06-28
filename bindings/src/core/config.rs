@@ -13,6 +13,8 @@ pub struct LsmTreeConfig {
     pub compaction_idle_threshold_ms: u64,
     #[serde(default = "default_compaction_deadline_sec")]
     pub compaction_deadline_sec: u64,
+    #[serde(default)]
+    pub verify_checksums: bool,
 }
 
 fn default_compaction_cpu_limit() -> f64 {
@@ -36,6 +38,7 @@ impl Default for LsmTreeConfig {
             compaction_cpu_limit: 0.05,
             compaction_idle_threshold_ms: 5000,
             compaction_deadline_sec: 30,
+            verify_checksums: false,
         }
     }
 }

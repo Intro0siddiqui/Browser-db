@@ -9,7 +9,8 @@ use std::io::{Write, Seek, SeekFrom};
 fn test_block_checksum_verification() {
     let dir = tempdir().unwrap();
     let path = dir.path();
-    let config = BrowserDBConfig::default();
+    let mut config = BrowserDBConfig::default();
+    config.lsm_tree.verify_checksums = true;
 
     let lsm_tree = LSMTree::new(path, TableType::History, 1024 * 1024, config).unwrap();
 
@@ -37,7 +38,9 @@ fn test_block_checksum_verification() {
 
     // Re-open the tree to clear any cached state if necessary,
     // though here we are testing the Mmap read which should hit the corrupted file.
-    let lsm_tree2 = LSMTree::new(path, TableType::History, 1024 * 1024, BrowserDBConfig::default()).unwrap();
+    let mut config2 = BrowserDBConfig::default();
+    config2.lsm_tree.verify_checksums = true;
+    let lsm_tree2 = LSMTree::new(path, TableType::History, 1024 * 1024, config2).unwrap();
 
     // Should return None because checksum verification fails
     assert!(lsm_tree2.get(&key).is_none());
