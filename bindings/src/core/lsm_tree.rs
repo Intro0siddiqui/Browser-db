@@ -1,15 +1,17 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Write, Seek, SeekFrom};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::cmp::Ordering;
 use parking_lot::{RwLock, RwLockReadGuard};
 use memmap2::Mmap;
 use self_cell::self_cell;
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Mutex, Condvar};
 
 use crate::core::format::{BDBLogEntry, EntryType, TableType, BDBFileHeader, BDBFileFooter, BDB_HEADER_SIZE, BDB_FOOTER_SIZE, BDB_BLOCK_SIZE, BDB_RESTART_INTERVAL};
 use crate::core::heatmap::{BloomFilter, HeatTracker, QueryType};
@@ -24,6 +26,44 @@ pub struct KVEntry {
     pub expires_at: u64,
     pub entry_type: EntryType,
     pub deleted: bool,
+}
+
+pub struct TokenBucket {
+    pub bytes_per_sec: f64,
+    pub last_checked: std::time::Instant,
+    pub tokens: f64,
+}
+
+impl TokenBucket {
+    pub fn new(rate_mb_per_sec: f64) -> Self {
+        let bytes_per_sec = rate_mb_per_sec * 1024.0 * 1024.0;
+        Self {
+            bytes_per_sec,
+            last_checked: std::time::Instant::now(),
+            tokens: bytes_per_sec, // Start full
+        }
+    }
+
+    pub fn consume(&mut self, bytes: usize) {
+        if self.bytes_per_sec <= 0.0 {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_checked).as_secs_f64();
+        self.last_checked = now;
+        
+        self.tokens = (self.tokens + elapsed * self.bytes_per_sec).min(self.bytes_per_sec);
+        
+        self.tokens -= bytes as f64;
+        if self.tokens < 0.0 {
+            let sleep_secs = -self.tokens / self.bytes_per_sec;
+            if sleep_secs > 0.0 {
+                std::thread::sleep(std::time::Duration::from_secs_f64(sleep_secs));
+                self.last_checked = std::time::Instant::now();
+                self.tokens = 0.0;
+            }
+        }
+    }
 }
 
 impl KVEntry {
@@ -103,12 +143,26 @@ impl MemTable {
         self.current_size += new_size;
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<KVEntry> {
-        self.entries.get(key).cloned()
+    pub fn get(&self, key: &[u8]) -> Option<&KVEntry> {
+        self.entries.get(key)
     }
 
     pub fn should_flush(&self) -> bool {
         self.current_size >= self.max_size
+    }
+
+    pub fn should_flush_tuned(&self, power_save: bool, low_memory: bool) -> bool {
+        let mut target_max = self.max_size;
+        if low_memory {
+            target_max = target_max / 2;
+        }
+        if power_save {
+            // Buffer more in RAM (defer flushes): e.g. double the capacity threshold or skip flushing unless low_memory is active
+            if !low_memory {
+                target_max = target_max * 2;
+            }
+        }
+        self.current_size >= target_max
     }
     
     pub fn clear(&mut self) {
@@ -132,6 +186,7 @@ pub struct SSTable {
     pub index: Vec<IndexEntry>,
     pub bloom_filter: Option<BloomFilter>,
     pub block_checksums: Vec<u32>,
+    pub data_end: usize,
 }
 
 pub struct SSTableIterator<'a> {
@@ -337,33 +392,34 @@ pub struct SourceIterator<'a> {
     source_id: usize, // used for stable tie-breaking
 }
 
-struct HeapNode<'a> {
-    entry: KVEntry,
+struct HeapNode {
+    key: Vec<u8>,
+    timestamp: u64,
     source_id: usize,
-    iter: Box<dyn Iterator<Item = io::Result<KVEntry>> + 'a>,
+    iter_index: usize,
 }
 
-impl<'a> PartialEq for HeapNode<'a> {
+impl PartialEq for HeapNode {
     fn eq(&self, other: &Self) -> bool {
-        self.entry.key == other.entry.key && self.entry.timestamp == other.entry.timestamp
+        self.key == other.key && self.timestamp == other.timestamp
     }
 }
 
-impl<'a> Eq for HeapNode<'a> {}
+impl Eq for HeapNode {}
 
-impl<'a> PartialOrd for HeapNode<'a> {
+impl PartialOrd for HeapNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a> Ord for HeapNode<'a> {
+impl Ord for HeapNode {
     fn cmp(&self, other: &Self) -> Ordering {
         // Min-heap based on key (alphabetical)
-        let mut ord = other.entry.key.cmp(&self.entry.key);
+        let mut ord = other.key.cmp(&self.key);
         if ord == Ordering::Equal {
             // Newest timestamp first for same key
-            ord = self.entry.timestamp.cmp(&other.entry.timestamp);
+            ord = self.timestamp.cmp(&other.timestamp);
         }
         if ord == Ordering::Equal {
             // Source ID as last resort for stability
@@ -393,8 +449,15 @@ impl Iterator for SSTableStreamWrapper {
     }
 }
 
+struct HeapSource<'a> {
+    iter: Box<dyn Iterator<Item = io::Result<KVEntry>> + 'a>,
+    source_id: usize,
+    current_entry: Option<KVEntry>,
+}
+
 pub struct MergeIterator<'a> {
-    heap: BinaryHeap<HeapNode<'a>>,
+    heap: BinaryHeap<HeapNode>,
+    sources: Vec<HeapSource<'a>>,
     last_yielded_key: Vec<u8>,
     prefix: Vec<u8>,
 }
@@ -402,17 +465,43 @@ pub struct MergeIterator<'a> {
 impl<'a> MergeIterator<'a> {
     pub fn new(iters: Vec<SourceIterator<'a>>, prefix: Vec<u8>) -> Self {
         let mut heap = BinaryHeap::new();
-        for mut src in iters {
-            if let Some(Ok(entry)) = src.iter.next() {
-                heap.push(HeapNode {
-                    entry,
-                    source_id: src.source_id,
+        let mut sources = Vec::new();
+        for (i, mut src) in iters.into_iter().enumerate() {
+            if let Some(res) = src.iter.next() {
+                match res {
+                    Ok(entry) => {
+                        heap.push(HeapNode {
+                            key: entry.key.clone(),
+                            timestamp: entry.timestamp,
+                            source_id: src.source_id,
+                            iter_index: i,
+                        });
+                        sources.push(HeapSource {
+                            iter: src.iter,
+                            source_id: src.source_id,
+                            current_entry: Some(entry),
+                        });
+                    }
+                    Err(_) => {
+                        // If it fails immediately, we'll still keep the entry as None.
+                        sources.push(HeapSource {
+                            iter: src.iter,
+                            source_id: src.source_id,
+                            current_entry: None,
+                        });
+                    }
+                }
+            } else {
+                sources.push(HeapSource {
                     iter: src.iter,
+                    source_id: src.source_id,
+                    current_entry: None,
                 });
             }
         }
         Self {
             heap,
+            sources,
             last_yielded_key: Vec::new(),
             prefix,
         }
@@ -425,18 +514,21 @@ impl<'a> Iterator for MergeIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
 
-        while let Some(mut node) = self.heap.pop() {
-            let key = node.entry.key.clone();
-            let mut current_entry = node.entry.clone();
+        while let Some(node) = self.heap.pop() {
+            let src = &mut self.sources[node.iter_index];
+            let mut current_entry = src.current_entry.take().unwrap();
+            let key = current_entry.key.clone();
 
-            if let Some(res) = node.iter.next() {
+            if let Some(res) = src.iter.next() {
                 match res {
                     Ok(next_entry) => {
                         self.heap.push(HeapNode {
-                            entry: next_entry,
-                            source_id: node.source_id,
-                            iter: node.iter,
+                            key: next_entry.key.clone(),
+                            timestamp: next_entry.timestamp,
+                            source_id: src.source_id,
+                            iter_index: node.iter_index,
                         });
+                        src.current_entry = Some(next_entry);
                     }
                     Err(e) => return Some(Err(e)),
                 }
@@ -465,21 +557,24 @@ impl<'a> Iterator for MergeIterator<'a> {
             }
 
             while let Some(peek_node) = self.heap.peek() {
-                if peek_node.entry.key != key {
+                if peek_node.key != key {
                     break;
                 }
                 
-                let mut next_node = self.heap.pop().unwrap();
-                let next_entry = next_node.entry.clone();
+                let peek_node = self.heap.pop().unwrap();
+                let next_src = &mut self.sources[peek_node.iter_index];
+                let next_entry = next_src.current_entry.take().unwrap();
                 
-                if let Some(res) = next_node.iter.next() {
+                if let Some(res) = next_src.iter.next() {
                     match res {
                         Ok(new_entry) => {
                             self.heap.push(HeapNode {
-                                entry: new_entry,
-                                source_id: next_node.source_id,
-                                iter: next_node.iter,
+                                key: new_entry.key.clone(),
+                                timestamp: new_entry.timestamp,
+                                source_id: next_src.source_id,
+                                iter_index: peek_node.iter_index,
                             });
+                            next_src.current_entry = Some(new_entry);
                         }
                         Err(e) => return Some(Err(e)),
                     }
@@ -558,14 +653,24 @@ where
     f()
 }
 
+pub fn extract_prefix(key: &[u8]) -> &[u8] {
+    if let Some(pos) = key.iter().position(|&b| b == b':') {
+        &key[..=pos] // include the delimiter ':'
+    } else {
+        let n = key.len().min(8);
+        &key[..n]
+    }
+}
+
 impl SSTable {
+
     pub fn verify_blocks(&self, start_pos: usize, end_pos: usize) -> io::Result<()> {
         let first_block = (start_pos - BDB_HEADER_SIZE) / BDB_BLOCK_SIZE;
         let last_block = (end_pos - 1 - BDB_HEADER_SIZE) / BDB_BLOCK_SIZE;
 
         for i in first_block..=last_block {
             let block_start = BDB_HEADER_SIZE + i * BDB_BLOCK_SIZE;
-            let block_end = (block_start + BDB_BLOCK_SIZE).min(self.mmap.len() - BDB_FOOTER_SIZE - self.block_checksums.len() * 4);
+            let block_end = (block_start + BDB_BLOCK_SIZE).min(self.data_end);
 
             if block_start >= block_end { continue; }
 
@@ -582,8 +687,9 @@ impl SSTable {
         Ok(())
     }
 
-    pub fn create(level: u8, entries: &BTreeMap<Vec<u8>, KVEntry>, base_path: &Path, table_type: TableType) -> io::Result<Self> {
+    pub fn create(level: u8, entries: &BTreeMap<Vec<u8>, KVEntry>, base_path: &Path, table_type: TableType, rate_limit_mb: Option<f64>) -> io::Result<Self> {
         let mut attempts = 0;
+        let mut rate_limiter = rate_limit_mb.map(TokenBucket::new);
         loop {
             let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?.as_millis();
             let timestamp_nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -618,7 +724,6 @@ impl SSTable {
                 let mut index = Vec::new();
                 let mut offset = header_size as u64;
                 let mut total_key_size = 0;
-                let mut total_value_size = 0;
                 let mut max_entry_size = 0;
                 
                 let mut last_key: Vec<u8> = Vec::new();
@@ -653,6 +758,10 @@ impl SSTable {
 
                     let size = self::write_compressed_entry(&mut file, &bdb_entry, shared)?;
                     
+                    if let Some(limiter) = &mut rate_limiter {
+                        limiter.consume(size);
+                    }
+
                     index.push(IndexEntry {
                         key: entry.key.clone(),
                         position: pos,
@@ -662,7 +771,6 @@ impl SSTable {
                     
                     offset += size as u64;
                     total_key_size += entry.key.len() as u64;
-                    total_value_size += entry.value.len() as u64;
                     max_entry_size = max_entry_size.max(size as u32);
                     last_key = entry.key.clone();
                     count += 1;
@@ -690,14 +798,28 @@ impl SSTable {
                     curr += to_read as u64;
                 }
 
-                // Restore position to write checksums
-                file.seek(SeekFrom::Start(data_end))?;
+                // Seek to offset (which equals data_end) to write checksums
+                file.seek(SeekFrom::Start(offset))?;
 
                 // Write Checksums to file
                 let crc_offset = offset;
                 for &crc in &block_checksums {
                     file.write_u32::<LittleEndian>(crc)?;
                     offset += 4;
+                }
+
+                // Serialize the index block to the end of the file
+                let index_offset = offset;
+                // We'll write the number of index entries as u64, and then write each IndexEntry.
+                file.write_u64::<LittleEndian>(index.len() as u64)?;
+                offset += 8;
+                for idx in &index {
+                    file.write_u64::<LittleEndian>(idx.position)?;
+                    file.write_u64::<LittleEndian>(idx.size as u64)?;
+                    file.write_u64::<LittleEndian>(idx.timestamp)?;
+                    file.write_u64::<LittleEndian>(idx.key.len() as u64)?;
+                    file.write_all(&idx.key)?;
+                    offset += 8 + 8 + 8 + 8 + idx.key.len() as u64;
                 }
 
                 let footer = BDBFileFooter {
@@ -707,7 +829,7 @@ impl SSTable {
                     block_crc_offset: crc_offset,
                     max_entry_size,
                     total_key_size,
-                    total_value_size,
+                    index_offset,
                     compression_ratio: 100,
                     reserved: [0; 2],
                     file_crc: 0,
@@ -724,10 +846,11 @@ impl SSTable {
                     unsafe { Mmap::map(&mmap_file) }
                 })?;
                 
-                // Build Bloom Filter
-                let mut bloom = BloomFilter::new(index.len(), 0.01);
+                // Build Bloom Filter (including prefixes)
+                let mut bloom = BloomFilter::new(index.len() * 2, 0.01);
                 for idx in &index {
                     bloom.add(&idx.key);
+                    bloom.add(extract_prefix(&idx.key));
                 }
 
                 Ok(Self {
@@ -737,6 +860,7 @@ impl SSTable {
                     index,
                     bloom_filter: Some(bloom),
                     block_checksums,
+                    data_end: data_end as usize,
                 })
             })();
 
@@ -752,18 +876,16 @@ impl SSTable {
     }
     
     pub fn get(&self, key: &[u8]) -> Option<KVEntry> {
-        // Check Bloom Filter
         if let Some(bf) = &self.bloom_filter {
             if !bf.might_contain(key) {
                 return None;
             }
         }
-        
-        // Binary Search Index
+
         if let Ok(idx) = self.index.binary_search_by(|i| i.key.as_slice().cmp(key)) {
             return self.get_at_index(&self.index[idx]);
         }
-        
+
         None
     }
 
@@ -771,21 +893,16 @@ impl SSTable {
         let start = index_entry.position as usize;
         let end = start + index_entry.size;
 
-        if end > self.mmap.len() { return None; }
+        if end > self.mmap.len() {
+            return None;
+        }
 
-        // Verify block checksums
-        if let Err(_) = self.verify_blocks(start, end) {
+        if self.verify_blocks(start, end).is_err() {
             return None;
         }
 
         let data = &self.mmap[start..end];
         let mut cursor = io::Cursor::new(data);
-
-        // Since we use variable shared length, we need to know the shared length.
-        // But for random access, we must know the shared length.
-        // In our simple implementation, every Nth entry is a restart point (shared=0).
-        // For random access via index, we fortunately stored the full key in IndexEntry,
-        // and we can reconstruct if we read carefully.
 
         if let Ok(log_entry) = read_compressed_entry(&mut cursor, &index_entry.key) {
             return Some(KVEntry {
@@ -801,7 +918,7 @@ impl SSTable {
     }
 
     pub fn iter(&self) -> SSTableIterator<'_> {
-        let limit = self.mmap.len() - BDB_FOOTER_SIZE - self.block_checksums.len() * 4;
+        let limit = self.data_end;
         SSTableIterator {
             sstable: self,
             offset: BDB_HEADER_SIZE,
@@ -811,7 +928,7 @@ impl SSTable {
     }
 
     pub fn seek_prefix(&self, prefix: &[u8]) -> SSTableIterator<'_> {
-        let limit = self.mmap.len() - BDB_FOOTER_SIZE - self.block_checksums.len() * 4;
+        let limit = self.data_end;
 
         // Find the first entry that might match the prefix
         let idx = match self.index.binary_search_by(|i| i.key.as_slice().cmp(prefix)) {
@@ -872,32 +989,65 @@ impl SSTable {
         }
 
         let mut index = Vec::new();
-        let mut offset = BDB_HEADER_SIZE;
-        let data_end = footer.block_crc_offset as usize;
-        
-        let mut last_key = Vec::new();
-        while offset < data_end {
-            let mut cursor = io::Cursor::new(&mmap[offset..data_end]);
-            match read_compressed_entry(&mut cursor, &last_key) {
-                Ok(entry) => {
-                    let size = cursor.position() as usize;
-                    index.push(IndexEntry {
-                        key: entry.key.clone(),
-                        position: offset as u64,
-                        size,
-                        timestamp: entry.timestamp,
-                    });
-                    last_key = entry.key.clone();
-                    offset += size;
+        let index_offset = footer.index_offset as usize;
+        let footer_start = mmap.len() - BDB_FOOTER_SIZE;
+        if index_offset > 0 && index_offset < footer_start {
+            let mut index_cursor = io::Cursor::new(&mmap[index_offset..footer_start]);
+            if let Ok(entry_count) = index_cursor.read_u64::<LittleEndian>() {
+                for _ in 0..entry_count {
+                    if let (Ok(position), Ok(size), Ok(timestamp), Ok(key_len)) = (
+                        index_cursor.read_u64::<LittleEndian>(),
+                        index_cursor.read_u64::<LittleEndian>(),
+                        index_cursor.read_u64::<LittleEndian>(),
+                        index_cursor.read_u64::<LittleEndian>(),
+                    ) {
+                        let mut key = vec![0u8; key_len as usize];
+                        if index_cursor.read_exact(&mut key).is_ok() {
+                            index.push(IndexEntry {
+                                key,
+                                position,
+                                size: size as usize,
+                                timestamp,
+                            });
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
                 }
-                Err(_) => break, // Stop on error or EOF
+            }
+        }
+
+        // Fallback to full file parsing if index loading failed or is empty
+        if index.is_empty() {
+            let mut offset = BDB_HEADER_SIZE;
+            let data_end = footer.block_crc_offset as usize;
+            let mut last_key = Vec::new();
+            while offset < data_end {
+                let mut cursor = io::Cursor::new(&mmap[offset..data_end]);
+                match read_compressed_entry(&mut cursor, &last_key) {
+                    Ok(entry) => {
+                        let size = cursor.position() as usize;
+                        index.push(IndexEntry {
+                            key: entry.key.clone(),
+                            position: offset as u64,
+                            size,
+                            timestamp: entry.timestamp,
+                        });
+                        last_key = entry.key.clone();
+                        offset += size;
+                    }
+                    Err(_) => break, // Stop on error or EOF
+                }
             }
         }
         
-        // Build Bloom Filter
-        let mut bloom = BloomFilter::new(index.len(), 0.01);
+        // Build Bloom Filter (including prefixes)
+        let mut bloom = BloomFilter::new(index.len() * 2, 0.01);
         for idx in &index {
             bloom.add(&idx.key);
+            bloom.add(extract_prefix(&idx.key));
         }
 
         Ok(Self {
@@ -907,6 +1057,7 @@ impl SSTable {
             index,
             bloom_filter: Some(bloom),
             block_checksums,
+            data_end: footer.block_crc_offset as usize,
         })
     }
 }
@@ -940,6 +1091,17 @@ pub struct LSMTree {
     pub inner: Arc<LSMTreeInner>,
 }
 
+#[derive(Debug)]
+pub struct CompactionTask {
+    pub level: usize,
+    pub created_at: SystemTime,
+}
+
+pub struct CompactionQueue {
+    pub pending: Vec<CompactionTask>,
+    pub active_levels: HashSet<usize>,
+}
+
 pub struct LSMTreeInner {
     pub memtable: [RwLock<MemTable>; 16],
     pub levels: Vec<RwLock<Vec<Arc<SSTable>>>>, // 10 levels
@@ -951,6 +1113,11 @@ pub struct LSMTreeInner {
     pub config: crate::core::config::BrowserDBConfig,
     pub indices: Vec<IndexDefinitionInternal>,
     pub is_index: bool,
+    pub last_active_time: Arc<AtomicU64>,
+    pub compaction_state: Arc<(Mutex<CompactionQueue>, Condvar)>,
+    pub power_save_mode: std::sync::atomic::AtomicBool,
+    pub low_memory_mode: std::sync::atomic::AtomicBool,
+    pub shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct IndexDefinitionInternal {
@@ -1122,22 +1289,172 @@ impl LSMTree {
             }
         }
         
-        Ok(Self {
-            inner: Arc::new(LSMTreeInner {
-                memtable,
-                levels,
-                base_path: base_path.to_path_buf(),
-                table_type,
-                wal: RwLock::new(wal),
-                blob_log,
-                heat_tracker: HeatTracker::new(config.heatmap.max_entries),
-                config,
-                indices,
-                is_index,
-            })
-        })
+        let last_active_time = Arc::new(AtomicU64::new(
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+        ));
+
+        let compaction_state = Arc::new((
+            Mutex::new(CompactionQueue {
+                pending: Vec::new(),
+                active_levels: HashSet::new(),
+            }),
+            Condvar::new(),
+        ));
+
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let inner = Arc::new(LSMTreeInner {
+            memtable,
+            levels,
+            base_path: base_path.to_path_buf(),
+            table_type,
+            wal: RwLock::new(wal),
+            blob_log,
+            heat_tracker: HeatTracker::new(config.heatmap.max_entries),
+            config,
+            indices,
+            is_index,
+            last_active_time,
+            compaction_state,
+            power_save_mode: std::sync::atomic::AtomicBool::new(false),
+            low_memory_mode: std::sync::atomic::AtomicBool::new(false),
+            shutdown: Arc::clone(&shutdown),
+        });
+
+        // Start background compaction worker thread
+        let inner_clone = Arc::clone(&inner);
+        std::thread::spawn(move || {
+            // Set thread priorities (lowest)
+            #[cfg(unix)]
+            unsafe {
+                extern "C" {
+                    fn setpriority(which: i32, who: i32, prio: i32) -> i32;
+                }
+                setpriority(0, 0, 20);
+            }
+            #[cfg(windows)]
+            unsafe {
+                extern "system" {
+                    fn GetCurrentThread() -> *mut std::ffi::c_void;
+                    fn SetThreadPriority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+                }
+                SetThreadPriority(GetCurrentThread(), -2); // THREAD_PRIORITY_LOWEST
+            }
+
+            loop {
+                if inner_clone.shutdown.load(AtomicOrdering::Relaxed) {
+                    break;
+                }
+
+                let task = {
+                    let &(ref lock, ref cvar) = &*inner_clone.compaction_state;
+                    let mut queue = lock.lock().unwrap();
+                    loop {
+                        // Check if we can run any pending task
+                        let mut task_idx = None;
+                        for (idx, pending_task) in queue.pending.iter().enumerate() {
+                            if !queue.active_levels.contains(&pending_task.level) {
+                                // Check if we should delay due to "Silent Window" + "Max Deadline"
+                                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                                let last_active = inner_clone.last_active_time.load(AtomicOrdering::Relaxed);
+                                let idle_duration = now.saturating_sub(last_active);
+                                
+                                let l0_count = inner_clone.levels[0].read().len();
+                                let time_pending = pending_task.created_at.elapsed().unwrap_or_default().as_secs();
+                                
+                                // Silent window and deadline configured dynamically
+                                let deadline = inner_clone.config.lsm_tree.compaction_deadline_sec;
+                                let idle_threshold = inner_clone.config.lsm_tree.compaction_idle_threshold_ms;
+
+                                let force_run = (l0_count >= 4 && time_pending >= deadline) || 
+                                                (inner_clone.config.lsm_tree.max_level0_files >= 4 && 
+                                                 l0_count >= inner_clone.config.lsm_tree.max_level0_files && 
+                                                 time_pending >= deadline);
+                                
+                                // If power_save_mode is enabled, defer/delay compaction tasks in worker queue (unless low_memory_mode is active)
+                                let power_save = inner_clone.power_save_mode.load(AtomicOrdering::SeqCst);
+                                let low_mem = inner_clone.low_memory_mode.load(AtomicOrdering::SeqCst);
+                                
+                                let mut is_idle_or_forced = idle_duration >= idle_threshold || force_run;
+                                if power_save && !low_mem {
+                                    // Defer/disable compaction tasks: only run if extremely forced (e.g., time_pending >= 5 * deadline)
+                                    is_idle_or_forced = force_run && (time_pending >= 5 * deadline);
+                                }
+
+                                if is_idle_or_forced {
+                                    task_idx = Some(idx);
+                                    break;
+                                }
+                            }
+                        }
+
+                        if let Some(idx) = task_idx {
+                            let t = queue.pending.remove(idx);
+                            queue.active_levels.insert(t.level);
+                            break Some(t);
+                        }
+
+                        // Wait for a notification or a timeout to check silent window / deadline again
+                        let result = cvar.wait_timeout(queue, std::time::Duration::from_millis(100)).unwrap();
+                        queue = result.0;
+                    }
+                };
+
+                if let Some(t) = task {
+                    // Gather tables to compact
+                    let mut tables_to_compact = {
+                        let levels = inner_clone.levels[t.level].read();
+                        levels.clone()
+                    };
+
+                    if t.level == 0 {
+                        // Use HeatTracker to influence compaction priority for L0
+                        let heat = &inner_clone.heat_tracker;
+                        tables_to_compact.sort_by_cached_key(|t| {
+                            let mut total_heat = 0u64;
+                            for idx in &t.index {
+                                total_heat += heat.get_heat(&idx.key) as u64;
+                            }
+                            total_heat / t.index.len().max(1) as u64
+                        });
+                    }
+
+                    if !tables_to_compact.is_empty() {
+                        inner_clone.clone().run_compaction_cascade(t.level, tables_to_compact);
+                    }
+
+                    // Done with this level's compaction
+                    let &(ref lock, ref cvar) = &*inner_clone.compaction_state;
+                    let mut queue = lock.lock().unwrap();
+                    queue.active_levels.remove(&t.level);
+                    cvar.notify_all();
+                }
+            }
+        });
+
+        Ok(Self { inner })
     }
     
+    pub fn set_power_save_mode(&self, enabled: bool) {
+        self.inner.power_save_mode.store(enabled, AtomicOrdering::SeqCst);
+    }
+
+    pub fn set_low_memory_mode(&self, enabled: bool) {
+        self.inner.low_memory_mode.store(enabled, AtomicOrdering::SeqCst);
+        if enabled {
+            let _ = self.flush();
+        }
+    }
+
+    pub fn shutdown(&self) {
+        self.inner.shutdown.store(true, AtomicOrdering::Relaxed);
+        let &(ref lock, ref cvar) = &*self.inner.compaction_state;
+        let _queue = lock.lock();
+        cvar.notify_all();
+    }
+}
+
+impl LSMTree {
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> io::Result<()> {
         self.put_with_field_filter(key, value, None)
     }
@@ -1151,6 +1468,20 @@ impl LSMTree {
         value: Vec<u8>,
         allowed_fields: Option<&[&str]>,
     ) -> io::Result<()> {
+        let now_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        self.inner.last_active_time.store(now_time, AtomicOrdering::Relaxed);
+
+        // Level 0 Write Stall (Backpressure) to protect reads and prevent OOM/disk exhaustion.
+        let l0_count = self.inner.levels[0].read().len();
+        if l0_count >= 12 {
+            // Hard limit: stall incoming writes significantly
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        } else if l0_count >= 8 {
+            // Soft limit: scale delay dynamically (e.g. 10ms - 40ms)
+            let delay = (l0_count - 7) as u64 * 10;
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+
         // Write-Side Indexing
         if !self.inner.is_index {
             for idx in &self.inner.indices {
@@ -1181,7 +1512,9 @@ impl LSMTree {
         let mut mem = self.inner.memtable[shard].write();
         mem.put(key, stored_value, entry_type, 0);
 
-        if mem.should_flush() {
+        let power_save = self.inner.power_save_mode.load(AtomicOrdering::SeqCst);
+        let low_memory = self.inner.low_memory_mode.load(AtomicOrdering::SeqCst);
+        if mem.should_flush_tuned(power_save, low_memory) {
             drop(mem); // unlock
             self.flush()?;
         }
@@ -1189,6 +1522,9 @@ impl LSMTree {
     }
 
     pub fn increment(&self, key: Vec<u8>, delta: i64) -> io::Result<()> {
+        let now_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        self.inner.last_active_time.store(now_time, AtomicOrdering::Relaxed);
+
         let value = delta.to_le_bytes().to_vec();
         let mut wal_entry = BDBLogEntry::new(EntryType::Increment, key.clone(), value.clone());
         self.inner.wal.write().log(&mut wal_entry)?;
@@ -1197,7 +1533,9 @@ impl LSMTree {
         let mut mem = self.inner.memtable[shard].write();
         mem.put(key, value, EntryType::Increment, 0);
 
-        if mem.should_flush() {
+        let power_save = self.inner.power_save_mode.load(AtomicOrdering::SeqCst);
+        let low_memory = self.inner.low_memory_mode.load(AtomicOrdering::SeqCst);
+        if mem.should_flush_tuned(power_save, low_memory) {
             drop(mem);
             self.flush()?;
         }
@@ -1205,7 +1543,10 @@ impl LSMTree {
     }
 
     pub fn put_with_ttl(&self, key: Vec<u8>, value: Vec<u8>, ttl_ms: u64) -> io::Result<()> {
-        let expires_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 + ttl_ms;
+        let now_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        self.inner.last_active_time.store(now_time, AtomicOrdering::Relaxed);
+
+        let expires_at = now_time + ttl_ms;
 
         // Write-Side Indexing
         if !self.inner.is_index {
@@ -1234,7 +1575,9 @@ impl LSMTree {
         let mut mem = self.inner.memtable[shard].write();
         mem.put(key, stored_value, entry_type, expires_at);
 
-        if mem.should_flush() {
+        let power_save = self.inner.power_save_mode.load(AtomicOrdering::SeqCst);
+        let low_memory = self.inner.low_memory_mode.load(AtomicOrdering::SeqCst);
+        if mem.should_flush_tuned(power_save, low_memory) {
             drop(mem);
             self.flush()?;
         }
@@ -1242,6 +1585,9 @@ impl LSMTree {
     }
 
     pub fn apply_batch(&self, batch: Batch) -> io::Result<()> {
+        let now_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        self.inner.last_active_time.store(now_time, AtomicOrdering::Relaxed);
+
         // Write-Side Indexing for Batch
         if !self.inner.is_index {
             for (k, v, t) in &batch.entries {
@@ -1269,12 +1615,14 @@ impl LSMTree {
         wal.log(&mut BDBLogEntry::new(EntryType::BatchEnd, Vec::new(), Vec::new()))?;
         drop(wal);
 
+        let power_save = self.inner.power_save_mode.load(AtomicOrdering::SeqCst);
+        let low_memory = self.inner.low_memory_mode.load(AtomicOrdering::SeqCst);
         let mut needs_flush = false;
         for (k, v, t) in batch.entries {
             let shard = (k.first().cloned().unwrap_or(0) % 16) as usize;
             let mut mem = self.inner.memtable[shard].write();
             mem.put(k, v, t, 0);
-            if mem.should_flush() {
+            if mem.should_flush_tuned(power_save, low_memory) {
                 needs_flush = true;
             }
         }
@@ -1318,6 +1666,9 @@ impl LSMTree {
     }
     
     pub fn get(&self, key: &[u8]) -> Option<KVEntry> {
+        let now_time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        self.inner.last_active_time.store(now_time, AtomicOrdering::Relaxed);
+
         self.inner.heat_tracker.record_access(key, QueryType::Read);
 
         let mut entry = self.inner.get_raw(key)?;
@@ -1325,7 +1676,7 @@ impl LSMTree {
             return None;
         }
 
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let now = now_time;
         if entry.expires_at > 0 && entry.expires_at < now {
             return None;
         }
@@ -1341,6 +1692,9 @@ impl LSMTree {
     }
 
     pub fn delete(&self, key: Vec<u8>) -> io::Result<()> {
+        let now_time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        self.inner.last_active_time.store(now_time, AtomicOrdering::Relaxed);
+
         let mut wal_entry = BDBLogEntry::new(EntryType::Delete, key.clone(), Vec::new());
         self.inner.wal.write().log(&mut wal_entry)?;
 
@@ -1380,6 +1734,13 @@ impl LSMTree {
         for level in &self.inner.levels {
             let sstables = level.read();
             for sstable in sstables.iter() {
+                if !prefix.is_empty() {
+                    if let Some(bf) = &sstable.bloom_filter {
+                        if !bf.might_contain(prefix) && !bf.might_contain(extract_prefix(prefix)) {
+                            continue;
+                        }
+                    }
+                }
                 let sst_clone = Arc::clone(sstable);
                 let cell = SSTableIterCell::new(sst_clone, |sst| sst.seek_prefix(prefix));
 
@@ -1435,6 +1796,13 @@ impl LSMTree {
         for level in &self.inner.levels {
             let sstables = level.read();
             for sstable in sstables.iter().rev() {
+                if !prefix.is_empty() {
+                    if let Some(bf) = &sstable.bloom_filter {
+                        if !bf.might_contain(prefix) && !bf.might_contain(extract_prefix(prefix)) {
+                            continue;
+                        }
+                    }
+                }
                 let start_idx = if prefix.is_empty() {
                     0
                 } else {
@@ -1475,8 +1843,6 @@ impl LSMTree {
     }
     
     pub fn flush(&self) -> io::Result<()> {
-        self.inner.wal.write().stop_flush_thread();
-
         let mut all_entries = BTreeMap::new();
         for shard in &self.inner.memtable {
             let mut mem = shard.write();
@@ -1490,7 +1856,7 @@ impl LSMTree {
         if all_entries.is_empty() { return Ok(()); }
         
         // Create SSTable (Level 0)
-        let sstable = Arc::new(SSTable::create(0, &all_entries, &self.inner.base_path, self.inner.table_type)?);
+        let sstable = Arc::new(SSTable::create(0, &all_entries, &self.inner.base_path, self.inner.table_type, None)?);
         
         // Add to Level 0
         {
@@ -1520,45 +1886,32 @@ impl LSMTreeInner {
     pub fn trigger_compaction(self: Arc<Self>, level: usize) {
         if level >= 9 { return; }
 
-        let (should_compact, mut tables_to_compact) = {
+        let should_compact = {
             let levels = self.levels[level].read();
             if level == 0 {
-                if levels.len() >= self.config.lsm_tree.max_level0_files {
-                    (true, levels.clone())
-                } else {
-                    (false, vec![])
-                }
+                levels.len() >= self.config.lsm_tree.max_level0_files
             } else {
                 let total_size: u64 = levels.iter().map(|s| s.mmap.len() as u64).sum();
                 let threshold = self.config.lsm_tree.level_size_thresholds_mb.get(level - 1)
                     .cloned()
                     .unwrap_or(10 * 10usize.pow(level as u32 - 1)) as u64 * 1024 * 1024;
-
-                if total_size > threshold {
-                    (true, levels.clone())
-                } else {
-                    (false, vec![])
-                }
+                total_size > threshold
             }
         };
 
         if should_compact {
-            if level == 0 {
-                // Use HeatTracker to influence compaction priority for L0
-                let heat = &self.heat_tracker;
-                tables_to_compact.sort_by_cached_key(|t| {
-                    let mut total_heat = 0u64;
-                    for idx in &t.index {
-                        total_heat += heat.get_heat(&idx.key) as u64;
-                    }
-                    total_heat / t.index.len().max(1) as u64
+            let &(ref lock, ref cvar) = &*self.compaction_state;
+            let mut queue = lock.lock().unwrap();
+            
+            // Track active level compactions to prevent queueing duplicate tasks for the same level.
+            let is_duplicate = queue.pending.iter().any(|t| t.level == level) || queue.active_levels.contains(&level);
+            if !is_duplicate {
+                queue.pending.push(CompactionTask {
+                    level,
+                    created_at: SystemTime::now(),
                 });
+                cvar.notify_all();
             }
-
-            let inner = Arc::clone(&self);
-            std::thread::spawn(move || {
-                inner.run_compaction_cascade(level, tables_to_compact);
-            });
         }
     }
 
@@ -1592,7 +1945,7 @@ impl LSMTreeInner {
 
             // Cascade to next level if threshold exceeded
             if next_level < 9 {
-                let (should_compact_next, tables_next) = {
+                let (should_compact_next, _tables_next) = {
                     let levels = self.levels[next_level].read();
                     let total_size: u64 = levels.iter().map(|s| s.mmap.len() as u64).sum();
                     let threshold = self.config.lsm_tree.level_size_thresholds_mb.get(next_level - 1)
@@ -1607,7 +1960,7 @@ impl LSMTreeInner {
                 };
 
                 if should_compact_next {
-                    self.run_compaction_cascade(next_level, tables_next);
+                    self.clone().trigger_compaction(next_level);
                 }
             }
         }
@@ -1685,7 +2038,8 @@ impl LSMTreeInner {
 
         // 1. MemTable
         let shard = (key.first().cloned().unwrap_or(0) % 16) as usize;
-        if let Some(entry) = self.memtable[shard].read().get(key) {
+        if let Some(entry_ref) = self.memtable[shard].read().get(key) {
+            let entry = entry_ref.clone();
             if entry.entry_type == EntryType::Increment {
                 has_increments = true;
                 if entry.value.len() == 8 {
@@ -1866,7 +2220,13 @@ impl LSMTreeInner {
             }
         }
 
-        let new_sstable = Arc::new(SSTable::create(level, &merged_entries, &self.base_path, self.table_type)?);
+        // Derive write rate limit in MB/s from compaction_cpu_limit (e.g. compaction_cpu_limit * 200.0 MB/s, default 0.05 -> 10.0 MB/s)
+        let rate_limit = if self.config.lsm_tree.compaction_cpu_limit > 0.0 {
+            Some(self.config.lsm_tree.compaction_cpu_limit * 200.0)
+        } else {
+            Some(10.0)
+        };
+        let new_sstable = Arc::new(SSTable::create(level, &merged_entries, &self.base_path, self.table_type, rate_limit)?);
 
         // Note: SSTable file removal is now handled in `run_compaction_cascade`
         // after removing the table entries from `self.levels` to prevent locking

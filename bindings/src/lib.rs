@@ -14,7 +14,10 @@ use crate::core::modes::{ModeSwitcher, CurrentMode};
 use crate::core::config::BrowserDBConfig;
 
 pub mod types {
-    pub use super::{HistoryEntry, CookieEntry, CacheEntry, LocalStoreEntry, SettingEntry, BookmarkEntry};
+    pub use super::{
+        HistoryEntry, CookieEntry, CacheEntry, LocalStoreEntry, SettingEntry, BookmarkEntry,
+        HistoryEntryRef, CookieEntryRef, CacheEntryRef, LocalStoreEntryRef, SettingEntryRef, BookmarkEntryRef,
+    };
 }
 
 pub mod cookie_flags {
@@ -42,12 +45,32 @@ pub struct HistoryEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntryRef<'a> {
+    pub timestamp: u128,
+    pub url: &'a str,
+    pub url_hash: u128,
+    pub title: &'a str,
+    pub visit_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CookieEntry {
     pub domain_hash: u128,
     pub name: String,
     pub value: String,
     pub path: String,
     pub domain: String,
+    pub expiry: u64,
+    pub flags: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CookieEntryRef<'a> {
+    pub domain_hash: u128,
+    pub name: &'a str,
+    pub value: &'a str,
+    pub path: &'a str,
+    pub domain: &'a str,
     pub expiry: u64,
     pub flags: u8,
 }
@@ -80,6 +103,15 @@ pub struct CacheEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheEntryRef<'a> {
+    pub url_hash: u128,
+    pub headers: &'a str,
+    pub body: &'a [u8],
+    pub etag: &'a str,
+    pub last_modified: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalStoreEntry {
     pub origin_hash: u128,
     pub key: String,
@@ -87,9 +119,31 @@ pub struct LocalStoreEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalStoreEntryRef<'a> {
+    pub origin_hash: u128,
+    pub key: &'a str,
+    pub value: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingEntry {
     pub key: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingEntryRef<'a> {
+    pub key: &'a str,
+    pub value: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookmarkEntryRef<'a> {
+    pub url_hash: u128,
+    pub url: &'a str,
+    pub title: &'a str,
+    pub folder: &'a str,
+    pub created_at: u64,
 }
 
 pub struct Container {

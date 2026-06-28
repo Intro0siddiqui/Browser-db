@@ -334,7 +334,7 @@ pub struct BDBFileFooter {
     pub block_crc_offset: u64,
     pub max_entry_size: u32,
     pub total_key_size: u64,
-    pub total_value_size: u64,
+    pub index_offset: u64,
     pub compression_ratio: u16,
     pub reserved: [u8; 2],
     pub file_crc: u32,
@@ -349,7 +349,7 @@ impl BDBFileFooter {
             block_crc_offset: 0,
             max_entry_size: 0,
             total_key_size: 0,
-            total_value_size: 0,
+            index_offset: 0,
             compression_ratio: 100,
             reserved: [0; 2],
             file_crc: 0,
@@ -363,7 +363,7 @@ impl BDBFileFooter {
         writer.write_u64::<LittleEndian>(self.block_crc_offset)?;
         writer.write_u32::<LittleEndian>(self.max_entry_size)?;
         writer.write_u64::<LittleEndian>(self.total_key_size)?;
-        writer.write_u64::<LittleEndian>(self.total_value_size)?;
+        writer.write_u64::<LittleEndian>(self.index_offset)?;
         writer.write_u16::<LittleEndian>(self.compression_ratio)?;
         writer.write_all(&self.reserved)?;
         writer.write_u32::<LittleEndian>(self.file_crc)?;
@@ -377,7 +377,7 @@ impl BDBFileFooter {
         let block_crc_offset = reader.read_u64::<LittleEndian>()?;
         let max_entry_size = reader.read_u32::<LittleEndian>()?;
         let total_key_size = reader.read_u64::<LittleEndian>()?;
-        let total_value_size = reader.read_u64::<LittleEndian>()?;
+        let index_offset = reader.read_u64::<LittleEndian>()?;
         let compression_ratio = reader.read_u16::<LittleEndian>()?;
         
         let mut reserved = [0u8; 2];
@@ -392,7 +392,7 @@ impl BDBFileFooter {
             block_crc_offset,
             max_entry_size,
             total_key_size,
-            total_value_size,
+            index_offset,
             compression_ratio,
             reserved,
             file_crc,
