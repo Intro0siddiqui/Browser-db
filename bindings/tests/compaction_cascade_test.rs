@@ -14,6 +14,8 @@ fn test_compaction_cascade() {
     // Set low thresholds to trigger cascading compaction easily
     config.lsm_tree.max_level0_files = 2;
     config.lsm_tree.level_size_thresholds_mb = vec![1, 2, 4]; // L1: 1MB, L2: 2MB, L3: 4MB
+    config.lsm_tree.compaction_idle_threshold_ms = 0;
+    config.lsm_tree.compaction_deadline_sec = 0;
 
     let lsm_tree = LSMTree::new(path, TableType::History, 1024 * 1024, config).unwrap();
 

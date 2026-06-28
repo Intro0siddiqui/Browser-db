@@ -29,10 +29,25 @@ impl WALManager {
         let writer = Arc::new(Mutex::new(BufWriter::with_capacity(32 * 1024, file)));
         let stop_signal = Arc::new(AtomicBool::new(false));
 
-        let writer_clone = Arc::clone(&writer);
-        let stop_signal_clone = Arc::clone(&stop_signal);
+        // Do NOT spawn the flush thread here. After fork(), pthread_create fails
+        // with EINVAL because threads don't survive fork. Spawn lazily on first
+        // write instead — forked child processes that only read never need it.
 
-        let flush_thread = Some(thread::spawn(move || {
+        Ok(Self {
+            writer,
+            path: path.to_path_buf(),
+            stop_signal,
+            flush_thread: None,
+        })
+    }
+
+    fn ensure_flush_thread(&mut self) {
+        if self.flush_thread.is_some() {
+            return;
+        }
+        let writer_clone = Arc::clone(&self.writer);
+        let stop_signal_clone = Arc::clone(&self.stop_signal);
+        self.flush_thread = Some(thread::spawn(move || {
             while !stop_signal_clone.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(5));
                 {
@@ -46,13 +61,6 @@ impl WALManager {
             let _ = w.flush();
             let _ = w.get_ref().sync_all();
         }));
-
-        Ok(Self {
-            writer,
-            path: path.to_path_buf(),
-            stop_signal,
-            flush_thread,
-        })
     }
 
     pub fn stop_flush_thread(&mut self) {
@@ -63,6 +71,7 @@ impl WALManager {
     }
 
     pub fn log(&mut self, entry: &mut BDBLogEntry) -> io::Result<()> {
+        self.ensure_flush_thread();
         let mut w = self.writer.lock().unwrap();
         entry.write(&mut *w)?;
         Ok(())

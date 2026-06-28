@@ -32,7 +32,7 @@ fn test_blob_separation() {
 
     // Check that it's actually stored as a BlobIndex (6) in the memtable/sst
     let shard = (key2.first().cloned().unwrap_or(0) % 16) as usize;
-    let mem_entry = lsm_tree.inner.memtable[shard].read().get(&key2).unwrap();
+    let mem_entry = lsm_tree.inner.memtable[shard].read().get(&key2).cloned().unwrap();
     assert_eq!(mem_entry.entry_type as u8, 6); // BlobIndex
     assert_eq!(mem_entry.value.len(), 12); // BlobPointer size (8 + 4)
 }

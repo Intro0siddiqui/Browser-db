@@ -7,6 +7,24 @@ pub struct LsmTreeConfig {
     pub max_level0_files: usize,
     pub max_memtable_size_mb: usize,
     pub level_size_thresholds_mb: Vec<usize>,
+    #[serde(default = "default_compaction_cpu_limit")]
+    pub compaction_cpu_limit: f64,
+    #[serde(default = "default_compaction_idle_threshold_ms")]
+    pub compaction_idle_threshold_ms: u64,
+    #[serde(default = "default_compaction_deadline_sec")]
+    pub compaction_deadline_sec: u64,
+}
+
+fn default_compaction_cpu_limit() -> f64 {
+    0.05
+}
+
+fn default_compaction_idle_threshold_ms() -> u64 {
+    5000
+}
+
+fn default_compaction_deadline_sec() -> u64 {
+    30
 }
 
 impl Default for LsmTreeConfig {
@@ -15,6 +33,9 @@ impl Default for LsmTreeConfig {
             max_level0_files: 4,
             max_memtable_size_mb: 20,
             level_size_thresholds_mb: vec![10, 100, 1000, 10000, 100000, 1000000],
+            compaction_cpu_limit: 0.05,
+            compaction_idle_threshold_ms: 5000,
+            compaction_deadline_sec: 30,
         }
     }
 }
