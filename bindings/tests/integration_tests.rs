@@ -3,8 +3,8 @@
 use browserdb::*;
 use tempfile::tempdir;
 
-#[tokio::test]
-async fn test_database_creation_and_basic_operations() {
+#[test]
+fn test_database_creation_and_basic_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.bdb");
     
@@ -42,8 +42,8 @@ async fn test_database_creation_and_basic_operations() {
     }
 }
 
-#[tokio::test]
-async fn test_localstorage_query_builder() {
+#[test]
+fn test_localstorage_query_builder() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("localstore_query_test.bdb");
 
@@ -84,8 +84,8 @@ async fn test_localstorage_query_builder() {
     assert_eq!(index_results[0].key, "k1");
 }
 
-#[tokio::test]
-async fn test_cookie_operations() {
+#[test]
+fn test_cookie_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("cookie_test.bdb");
     
@@ -113,8 +113,8 @@ async fn test_cookie_operations() {
     assert!(!cookie.is_httponly());
 }
 
-#[tokio::test]
-async fn test_cache_operations() {
+#[test]
+fn test_cache_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("cache_test.bdb");
     
@@ -144,8 +144,8 @@ async fn test_cache_operations() {
     }
 }
 
-#[tokio::test]
-async fn test_localstorage_operations() {
+#[test]
+fn test_localstorage_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("localstore_test.bdb");
     
@@ -169,8 +169,8 @@ async fn test_localstorage_operations() {
     assert_eq!(entries[0].key, "user_preference");
 }
 
-#[tokio::test]
-async fn test_settings_operations() {
+#[test]
+fn test_settings_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("settings_test.bdb");
     
@@ -188,8 +188,8 @@ async fn test_settings_operations() {
     assert_eq!(language, Some("en".to_string()));
 }
 
-#[tokio::test]
-async fn test_privacy_wipe_operations() {
+#[test]
+fn test_privacy_wipe_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("privacy_test.bdb");
     
@@ -217,8 +217,8 @@ async fn test_privacy_wipe_operations() {
     println!("Privacy wipe result: removed {} entries", result);
 }
 
-#[tokio::test]
-async fn test_performance_operations() {
+#[test]
+fn test_performance_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("perf_test.bdb");
     
@@ -256,8 +256,8 @@ async fn test_performance_operations() {
     assert!(throughput > 500.0, "Write throughput too low: {:.0} entries/sec", throughput);
 }
 
-#[tokio::test]
-async fn test_database_wipe() {
+#[test]
+fn test_database_wipe() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("wipe_test.bdb");
     

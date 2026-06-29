@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-use crossbeam_channel::{bounded, Sender, Receiver};
+use crossbeam_channel::{bounded, Sender};
 use crate::core::format::BDBLogEntry;
 
 const WAL_CHANNEL_CAPACITY: usize = 4096;
@@ -181,7 +181,7 @@ mod tests {
         let wal_path = dir.path().join("test.wal");
 
         {
-            let mut wal = WALManager::new(&wal_path).unwrap();
+            let wal = WALManager::new(&wal_path).unwrap();
             let mut entry = BDBLogEntry::new(EntryType::Insert, b"key1".to_vec(), b"value1".to_vec());
             wal.log(&mut entry).unwrap();
         }

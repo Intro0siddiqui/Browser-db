@@ -11,7 +11,7 @@ fn test_wal_recovery_crash_sim() {
 
     // Create a WAL and write a valid entry
     {
-        let mut wal = WALManager::new(&wal_path).unwrap();
+        let wal = WALManager::new(&wal_path).unwrap();
         let mut entry = BDBLogEntry::new(EntryType::Insert, b"key1".to_vec(), b"val1".to_vec());
         wal.log(&mut entry).unwrap();
     }
