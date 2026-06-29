@@ -151,6 +151,10 @@ impl MemTable {
         self.current_size >= self.max_size
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn should_flush_tuned(&self, power_save: bool, low_memory: bool) -> bool {
         let mut target_max = self.max_size;
         if low_memory {
@@ -1109,6 +1113,7 @@ pub struct CompactionQueue {
 
 pub struct LSMTreeInner {
     pub memtable: [RwLock<MemTable>; 16],
+    pub frozen: [Mutex<Option<MemTable>>; 16],
     pub levels: Vec<RwLock<Vec<Arc<SSTable>>>>, // 10 levels
     pub base_path: PathBuf,
     pub table_type: TableType,
@@ -1120,9 +1125,14 @@ pub struct LSMTreeInner {
     pub is_index: bool,
     pub last_active_time: Arc<AtomicU64>,
     pub compaction_state: Arc<(Mutex<CompactionQueue>, Condvar)>,
+    pub flush_state: Arc<(Mutex<()>, Condvar)>,
+    pub flush_pending: std::sync::atomic::AtomicBool,
+    pub flush_seq: AtomicU64,
+    pub last_truncated_seq: AtomicU64,
     pub power_save_mode: std::sync::atomic::AtomicBool,
     pub low_memory_mode: std::sync::atomic::AtomicBool,
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
+    pub shutdown_flush: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct IndexDefinitionInternal {
@@ -1196,6 +1206,12 @@ impl LSMTree {
             .collect::<Vec<_>>()
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to initialize sharded memtable"))?;
+
+        let frozen: [Mutex<Option<MemTable>>; 16] = (0..16)
+            .map(|_| Mutex::new(None))
+            .collect::<Vec<_>>()
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to initialize frozen buffers"))?;
 
         // Recover from WAL
         let entries = wal.read_all()?;
@@ -1307,9 +1323,13 @@ impl LSMTree {
         ));
 
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown_flush = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let flush_state = Arc::new((Mutex::new(()), Condvar::new()));
 
         let inner = Arc::new(LSMTreeInner {
             memtable,
+            frozen,
             levels,
             base_path: base_path.to_path_buf(),
             table_type,
@@ -1321,9 +1341,14 @@ impl LSMTree {
             is_index,
             last_active_time,
             compaction_state,
+            flush_state,
+            flush_pending: std::sync::atomic::AtomicBool::new(false),
+            flush_seq: AtomicU64::new(0),
+            last_truncated_seq: AtomicU64::new(0),
             power_save_mode: std::sync::atomic::AtomicBool::new(false),
             low_memory_mode: std::sync::atomic::AtomicBool::new(false),
             shutdown: Arc::clone(&shutdown),
+            shutdown_flush: Arc::clone(&shutdown_flush),
         });
 
         // Start background compaction worker thread
@@ -1437,6 +1462,80 @@ impl LSMTree {
             }
         });
 
+        // Start background flush worker thread
+        let flush_inner = Arc::clone(&inner);
+        std::thread::spawn(move || {
+            #[cfg(unix)]
+            unsafe {
+                extern "C" {
+                    fn setpriority(which: i32, who: i32, prio: i32) -> i32;
+                }
+                setpriority(0, 0, 20);
+            }
+            #[cfg(windows)]
+            unsafe {
+                extern "system" {
+                    fn GetCurrentThread() -> *mut std::ffi::c_void;
+                    fn SetThreadPriority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+                }
+                SetThreadPriority(GetCurrentThread(), -2);
+            }
+
+            loop {
+                if flush_inner.shutdown_flush.load(AtomicOrdering::Relaxed) {
+                    break;
+                }
+
+                // Wait for flush signal or timeout
+                {
+                    let mut pending = flush_inner.flush_state.0.lock().unwrap();
+                    while !flush_inner.flush_pending.load(AtomicOrdering::SeqCst) {
+                        let result = flush_inner.flush_state.1.wait_timeout(pending, std::time::Duration::from_millis(100)).unwrap();
+                        pending = result.0;
+                        if flush_inner.shutdown_flush.load(AtomicOrdering::Relaxed) {
+                            break;
+                        }
+                    }
+                    flush_inner.flush_pending.store(false, AtomicOrdering::SeqCst);
+                }
+
+                // Process each shard's frozen buffer
+                for shard in 0..16 {
+                    let frozen = flush_inner.frozen[shard].lock().unwrap().take();
+                        if let Some(mem) = frozen {
+                        if mem.is_empty() { continue; }
+
+                        let entries: BTreeMap<Vec<u8>, KVEntry> = mem.entries.into_iter().collect();
+
+                        if let Ok(sstable) = SSTable::create(
+                            0, &entries, &flush_inner.base_path,
+                            flush_inner.table_type, None,
+                            flush_inner.config.lsm_tree.verify_checksums,
+                        ) {
+                            let sstable = Arc::new(sstable);
+                            {
+                                let mut l0 = flush_inner.levels[0].write();
+                                l0.push(sstable);
+                            }
+                            flush_inner.clone().trigger_compaction(0);
+                        }
+                    }
+                }
+
+                // WAL truncation: check if all shards are flushed
+                let last_seq = flush_inner.last_truncated_seq.load(AtomicOrdering::SeqCst);
+                let current_seq = flush_inner.flush_seq.load(AtomicOrdering::SeqCst);
+                if current_seq > last_seq {
+                    let all_clear = (0..16).all(|s| flush_inner.frozen[s].lock().unwrap().is_none());
+                    if all_clear {
+                        if flush_inner.wal.write().truncate().is_ok() {
+                            flush_inner.last_truncated_seq.store(current_seq, AtomicOrdering::SeqCst);
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(Self { inner })
     }
     
@@ -1447,15 +1546,35 @@ impl LSMTree {
     pub fn set_low_memory_mode(&self, enabled: bool) {
         self.inner.low_memory_mode.store(enabled, AtomicOrdering::SeqCst);
         if enabled {
-            let _ = self.flush();
+            // Flush all active memtables to frozen buffers
+            for shard in 0..16 {
+                let mut mem = self.inner.memtable[shard].write();
+                if !mem.is_empty() {
+                    let frozen_entries = std::mem::take(&mut mem.entries);
+                    mem.clear();
+
+                    let frozen_mem = MemTable {
+                        entries: frozen_entries,
+                        max_size: mem.max_size,
+                        current_size: 0,
+                        entry_count: 0,
+                        table_type: mem.table_type,
+                    };
+                    *self.inner.frozen[shard].lock().unwrap() = Some(frozen_mem);
+                }
+            }
+            self.inner.flush_pending.store(true, AtomicOrdering::SeqCst);
+            self.inner.flush_state.1.notify_one();
         }
     }
 
     pub fn shutdown(&self) {
         self.inner.shutdown.store(true, AtomicOrdering::Relaxed);
+        self.inner.shutdown_flush.store(true, AtomicOrdering::Relaxed);
         let &(ref lock, ref cvar) = &*self.inner.compaction_state;
         let _queue = lock.lock();
         cvar.notify_all();
+        self.inner.flush_state.1.notify_one();
     }
 }
 
@@ -1520,8 +1639,21 @@ impl LSMTree {
         let power_save = self.inner.power_save_mode.load(AtomicOrdering::SeqCst);
         let low_memory = self.inner.low_memory_mode.load(AtomicOrdering::SeqCst);
         if mem.should_flush_tuned(power_save, low_memory) {
-            drop(mem); // unlock
-            self.flush()?;
+            let frozen_entries = std::mem::take(&mut mem.entries);
+            mem.clear();
+
+            let frozen_mem = MemTable {
+                entries: frozen_entries,
+                max_size: mem.max_size,
+                current_size: 0,
+                entry_count: 0,
+                table_type: mem.table_type,
+            };
+            *self.inner.frozen[shard].lock().unwrap() = Some(frozen_mem);
+            drop(mem);
+
+            self.inner.flush_pending.store(true, AtomicOrdering::SeqCst);
+            self.inner.flush_state.1.notify_one();
         }
         Ok(())
     }
@@ -1541,8 +1673,21 @@ impl LSMTree {
         let power_save = self.inner.power_save_mode.load(AtomicOrdering::SeqCst);
         let low_memory = self.inner.low_memory_mode.load(AtomicOrdering::SeqCst);
         if mem.should_flush_tuned(power_save, low_memory) {
+            let frozen_entries = std::mem::take(&mut mem.entries);
+            mem.clear();
+
+            let frozen_mem = MemTable {
+                entries: frozen_entries,
+                max_size: mem.max_size,
+                current_size: 0,
+                entry_count: 0,
+                table_type: mem.table_type,
+            };
+            *self.inner.frozen[shard].lock().unwrap() = Some(frozen_mem);
             drop(mem);
-            self.flush()?;
+
+            self.inner.flush_pending.store(true, AtomicOrdering::SeqCst);
+            self.inner.flush_state.1.notify_one();
         }
         Ok(())
     }
@@ -1583,8 +1728,21 @@ impl LSMTree {
         let power_save = self.inner.power_save_mode.load(AtomicOrdering::SeqCst);
         let low_memory = self.inner.low_memory_mode.load(AtomicOrdering::SeqCst);
         if mem.should_flush_tuned(power_save, low_memory) {
+            let frozen_entries = std::mem::take(&mut mem.entries);
+            mem.clear();
+
+            let frozen_mem = MemTable {
+                entries: frozen_entries,
+                max_size: mem.max_size,
+                current_size: 0,
+                entry_count: 0,
+                table_type: mem.table_type,
+            };
+            *self.inner.frozen[shard].lock().unwrap() = Some(frozen_mem);
             drop(mem);
-            self.flush()?;
+
+            self.inner.flush_pending.store(true, AtomicOrdering::SeqCst);
+            self.inner.flush_state.1.notify_one();
         }
         Ok(())
     }
@@ -1612,7 +1770,7 @@ impl LSMTree {
             }
         }
 
-        let mut wal = self.inner.wal.write();
+        let wal = self.inner.wal.write();
         wal.log(&mut BDBLogEntry::new(EntryType::BatchStart, Vec::new(), Vec::new()))?;
         for (k, v, t) in &batch.entries {
             wal.log(&mut BDBLogEntry::new(*t, k.clone(), v.clone()))?;
@@ -1622,18 +1780,31 @@ impl LSMTree {
 
         let power_save = self.inner.power_save_mode.load(AtomicOrdering::SeqCst);
         let low_memory = self.inner.low_memory_mode.load(AtomicOrdering::SeqCst);
-        let mut needs_flush = false;
+        let mut flush_shards: Vec<usize> = Vec::new();
         for (k, v, t) in batch.entries {
             let shard = (k.first().cloned().unwrap_or(0) % 16) as usize;
             let mut mem = self.inner.memtable[shard].write();
             mem.put(k, v, t, 0);
             if mem.should_flush_tuned(power_save, low_memory) {
-                needs_flush = true;
+                let frozen_entries = std::mem::take(&mut mem.entries);
+                mem.clear();
+
+                let frozen_mem = MemTable {
+                    entries: frozen_entries,
+                    max_size: mem.max_size,
+                    current_size: 0,
+                    entry_count: 0,
+                    table_type: mem.table_type,
+                };
+                *self.inner.frozen[shard].lock().unwrap() = Some(frozen_mem);
+                drop(mem);
+                flush_shards.push(shard);
             }
         }
 
-        if needs_flush {
-            self.flush()?;
+        if !flush_shards.is_empty() {
+            self.inner.flush_pending.store(true, AtomicOrdering::SeqCst);
+            self.inner.flush_state.1.notify_one();
         }
         Ok(())
     }
@@ -1708,8 +1879,21 @@ impl LSMTree {
         mem.put(key, Vec::new(), EntryType::Delete, 0);
 
         if mem.should_flush() {
+            let frozen_entries = std::mem::take(&mut mem.entries);
+            mem.clear();
+
+            let frozen_mem = MemTable {
+                entries: frozen_entries,
+                max_size: mem.max_size,
+                current_size: 0,
+                entry_count: 0,
+                table_type: mem.table_type,
+            };
+            *self.inner.frozen[shard].lock().unwrap() = Some(frozen_mem);
             drop(mem);
-            self.flush()?;
+
+            self.inner.flush_pending.store(true, AtomicOrdering::SeqCst);
+            self.inner.flush_state.1.notify_one();
         }
         Ok(())
     }
@@ -1849,6 +2033,18 @@ impl LSMTree {
     
     pub fn flush(&self) -> io::Result<()> {
         let mut all_entries = BTreeMap::new();
+
+        // Drain frozen buffers first
+        for shard in 0..16 {
+            let frozen = self.inner.frozen[shard].lock().unwrap().take();
+            if let Some(mem) = frozen {
+                for (k, v) in mem.entries {
+                    all_entries.insert(k, v);
+                }
+            }
+        }
+
+        // Drain active memtables
         for shard in &self.inner.memtable {
             let mut mem = shard.write();
             let entries = std::mem::take(&mut mem.entries);
@@ -2112,7 +2308,7 @@ impl LSMTreeInner {
     }
 
     fn apply_batch_direct(&self, batch: Batch, entry_type: EntryType) -> io::Result<()> {
-        let mut wal = self.wal.write();
+        let wal = self.wal.write();
         wal.log(&mut BDBLogEntry::new(EntryType::BatchStart, Vec::new(), Vec::new()))?;
         for (k, v, _t) in &batch.entries {
             wal.log(&mut BDBLogEntry::new(entry_type, k.clone(), v.clone()))?;
@@ -2243,7 +2439,11 @@ impl LSMTreeInner {
 
 impl Drop for LSMTree {
     fn drop(&mut self) {
-        // Attempt to flush on drop
+        // Signal flush thread to stop
+        self.inner.shutdown_flush.store(true, AtomicOrdering::Relaxed);
+        self.inner.flush_state.1.notify_one();
+
+        // Flush remaining data synchronously
         if let Err(e) = self.flush() {
             eprintln!("Failed to flush LSMTree on drop: {}", e);
         }

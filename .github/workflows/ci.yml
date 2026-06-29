@@ -32,3 +32,25 @@ jobs:
 
       - name: Run tests
         run: cargo test -p browserdb --verbose -- --test-threads=1
+
+      - name: Run benchmarks
+        if: always()
+        run: cargo bench -p browserdb 2>&1 | tee bench-output.txt
+        continue-on-error: true
+
+      - name: Benchmark results
+        if: always()
+        run: |
+          echo "## Benchmark Results — ${{ matrix.os }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat bench-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.os }}
+          path: bench-output.txt
+          retention-days: 30

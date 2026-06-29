@@ -38,7 +38,8 @@ lz4_flex = "0.11"
 criterion = "0.4"
 rand = "0.8"
 tempfile = "3.0"
-tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+rusty-leveldb = "4.0"
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [features]
 # 启用性能测试
@@ -58,4 +59,12 @@ harness = false
 
 [[bench]]
 name = "api_benches"
+harness = false
+
+[[bench]]
+name = "optimization_benches"
+harness = false
+
+[[bench]]
+name = "comparison_benches"
 harness = false
