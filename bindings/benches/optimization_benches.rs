@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion, BatchSize};
 use browserdb::core::lsm_tree::{LSMTree};
-use browserdb::core::format::{EntryType, TableType};
+use browserdb::core::format::TableType;
 use browserdb::core::config::BrowserDBConfig;
 use tempfile::tempdir;
 use rand::Rng;

@@ -135,44 +135,59 @@ fn bench_multi_threaded_concurrency(c: &mut Criterion) {
 }
 
 fn bench_mode_comparison(c: &mut Criterion) {
-    let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
-    let table = db.localstore();
-    let mut rng = rand::thread_rng();
-
-    c.bench_function("mode_comparison_persistent_insert", |b| {
+    // Persistent mode — each benchmark gets its own fresh DB to avoid unbounded growth
+    {
+        let dir = tempdir().unwrap();
+        let db = BrowserDB::open(dir.path()).unwrap();
         db.set_mode(DatabaseMode::Persistent).unwrap();
-        b.iter_batched(
-            || {
-                LocalStoreEntry {
-                    origin_hash: rng.gen(),
-                    key: format!("key_{}", rng.gen::<u32>()),
-                    value: "persistent".to_string(),
-                }
-            },
-            |entry| {
-                table.insert(&entry).unwrap();
-            },
-            BatchSize::SmallInput,
-        )
-    });
+        let table = db.localstore();
+        let mut counter: u64 = 0;
 
-    c.bench_function("mode_comparison_ultra_insert", |b| {
+        c.bench_function("mode_comparison_persistent_insert", |b| {
+            b.iter_batched(
+                || {
+                    let entry = LocalStoreEntry {
+                        origin_hash: 1,
+                        key: format!("key_{}", counter),
+                        value: "persistent".to_string(),
+                    };
+                    counter += 1;
+                    entry
+                },
+                |entry| {
+                    table.insert(&entry).unwrap();
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+
+    // Ultra mode — same approach
+    {
+        let dir = tempdir().unwrap();
+        let db = BrowserDB::open(dir.path()).unwrap();
         db.set_mode(DatabaseMode::Ultra).unwrap();
-        b.iter_batched(
-            || {
-                LocalStoreEntry {
-                    origin_hash: rng.gen(),
-                    key: format!("key_{}", rng.gen::<u32>()),
-                    value: "ultra".to_string(),
-                }
-            },
-            |entry| {
-                table.insert(&entry).unwrap();
-            },
-            BatchSize::SmallInput,
-        )
-    });
+        let table = db.localstore();
+        let mut counter: u64 = 0;
+
+        c.bench_function("mode_comparison_ultra_insert", |b| {
+            b.iter_batched(
+                || {
+                    let entry = LocalStoreEntry {
+                        origin_hash: 1,
+                        key: format!("key_{}", counter),
+                        value: "ultra".to_string(),
+                    };
+                    counter += 1;
+                    entry
+                },
+                |entry| {
+                    table.insert(&entry).unwrap();
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
 }
 
 criterion_group!(benches, bench_api_insert_with_index, bench_query_builder_latency, bench_multi_threaded_concurrency, bench_mode_comparison);

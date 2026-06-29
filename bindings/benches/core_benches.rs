@@ -31,7 +31,7 @@ fn bench_memtable_insertion(c: &mut Criterion) {
 fn bench_wal_logging(c: &mut Criterion) {
     let dir = tempdir().unwrap();
     let wal_path = dir.path().join("test.wal");
-    let mut wal = WALManager::new(&wal_path).unwrap();
+    let wal = WALManager::new(&wal_path).unwrap();
     let mut rng = rand::thread_rng();
 
     c.bench_function("wal_log_sync", |b| {
