@@ -13,9 +13,9 @@ This report documents the discrepancies found between the legacy documentation a
 - **Action**: Updated all documentation to reflect the significantly higher actual performance.
 
 ### 2. Core API Structure
-- **Legacy Docs**: Described a generic `put(key, value)` / `get(key)` API on the main `BrowserDB` object.
-- **Actual Implementation**: Uses a specialized table-based API (`db.history()`, `db.cookies()`, etc.) returning domain-specific table handles.
-- **Action**: Completely rewrote `API_REFERENCE.md`, `USER_MANUAL.md`, and `QUICK_START.md` to reflect the table-based architecture.
+- **Legacy Docs**: Described a generic `put(key, value)` / `get(key)` API on the main `BrowserDB` object and missed several tables/operations (`bookmarks`, `binarystore`, multi-tenant containers, TTL inserts, atomic merge increments, `hot_search`).
+- **Actual Implementation**: Uses a specialized table-based API (`db.history()`, `db.bookmarks()`, `db.cookies()`, `db.cache()`, `db.localstore()`, `db.binarystore()`, `db.settings()`), multi-tenant container isolation (`db.container("tenant")`), TTL inserts, atomic merge increments (`increment`), heat-ranked searches (`hot_search`), and `fs2` process locking.
+- **Action**: Completely updated `API_REFERENCE.md`, `USER_MANUAL.md`, `DEVELOPER_GUIDE.md`, `README.md`, `QUICK_START.md`, and `FILE_STRUCTURE.md` to reflect all table models, container isolation, and advanced storage features.
 
 ### 3. Missing Features (Resolved in latest update)
 - **Legacy Docs**: Referenced `repair()`, `create_backup()`, `restore_from_backup()`, and FFI bindings as available.
@@ -26,9 +26,9 @@ This report documents the discrepancies found between the legacy documentation a
 - **Action**: Integrated FFI and Blob Storage documentation into the main guides. Moved remaining unimplemented features to an "Upcoming Features" section.
 
 ### 4. Architecture Details
-- **Legacy Docs**: Mentioned a simple BTreeMap MemTable.
-- **Actual Implementation**: Features a **sharded MemTable** (16 shards) with sharded locking, a **10-level LSM-tree**, and a **WAL Manager with background group-commits (5ms)**.
-- **Action**: Updated `DEVELOPER_GUIDE.md` and `README.md` with these advanced technical details.
+- **Legacy Docs**: Mentioned a simple BTreeMap MemTable and legacy Zig build references.
+- **Actual Implementation**: Features a 100% Pure Rust implementation with **16-shard MemTables**, **32-shard HeatTracker**, multi-tenant storage containers, process-level locking via `fs2`, WiscKey Blob separation, native secondary indexing, merge operators, and TTL filtering.
+- **Action**: Cleaned out stale Zig build references from `Contribution.md` and `FILE_STRUCTURE.md`; updated architectural diagrams and documentation in `DEVELOPER_GUIDE.md` and `README.md`.
 
 ### 5. LocalStore Indexing
 - **Legacy Docs**: No mention of secondary indexing.
@@ -41,11 +41,13 @@ This report documents the discrepancies found between the legacy documentation a
 
 | File | Major Updates |
 |------|---------------|
-| `README.md` | Updated performance stats, added sharded architecture highlights, highlighted FFI and Blob support. |
-| `API_REFERENCE.md` | Full rewrite to match Table-based API, added FFI documentation, corrected config structures. |
-| `DEVELOPER_GUIDE.md` | Added details on sharding, WAL group-commits, Blob storage, and C-FFI layer. Updated diagrams. |
-| `USER_MANUAL.md` | Corrected code examples, added LocalStore indexing guide and mode switching details. |
-| `QUICK_START.md` | Verified and corrected the "First Database" code example. |
+| `README.md` | Updated feature highlights (containers, TTL, merge operators, secondary indexing, process locks, AGPL-3.0 license). |
+| `API_REFERENCE.md` | Comprehensive coverage for `BookmarksTable`, `BinaryStoreTable`, multi-tenant containers, TTL, `increment`, `hot_search`, cookie & localstore operations. |
+| `DEVELOPER_GUIDE.md` | Added multi-tenant container architecture, 32-shard HeatTracker, process locking (`fs2`), LSM merge operators, secondary indexing, and updated subsystem diagrams. |
+| `USER_MANUAL.md` | Added code examples for multi-tenant containers, `bookmarks()`, `binarystore()`, TTL inserts, `increment`, and `hot_search`. |
+| `QUICK_START.md` | Updated code example to showcase table operations, atomic incrementing, and container usage. |
+| `FILE_STRUCTURE.md` | Replaced legacy file organization notes with 100% Rust subsystem layout mapping. |
+| `Contribution.md` | Removed stale Zig references, updated build workflow to Rust 1.75+, and corrected license reference to AGPL-3.0. |
 
 ---
 

@@ -39,11 +39,9 @@ Please follow common open-source community standards. Be respectful, inclusive, 
    git fetch upstream
 
 Prerequisites (for development)
-- Zig 0.14+
 - Rust 1.75+ 
-- CMake 3.16+
-- Cargo (for Rust examples/tests)
-- Node.js / npm (only if JS bindings or web tooling are added)
+- Cargo (for building and testing)
+- Node.js / Bun / Deno (optional, for testing JS FFI integration)
 
 For detailed setup and architecture, see DEVELOPER_GUIDE.md.
 
@@ -52,16 +50,16 @@ For detailed setup and architecture, see DEVELOPER_GUIDE.md.
 ## Branching & commit guidelines
 
 - Create a feature branch from main:
-  git checkout -b feat/<short-description>
-  or for fixes: git checkout -b fix/<short-description>
+  `git checkout -b feat/<short-description>`
+  or for fixes: `git checkout -b fix/<short-description>`
 
 - Use clear, descriptive branch names and PR titles.
 
 Commit message convention (recommended)
 - Use a short imperative summary:
-  feat(core): add heatmap eviction policy
-  fix(rust-bindings): handle null pointers in open()
-  docs: update QUICK_START.md for Zig build
+  `feat(core): add heatmap eviction policy`
+  `fix(lsm): handle null pointer in WAL recovery`
+  `docs: update API_REFERENCE.md for secondary indexing`
 - Include a longer description when needed in the commit body.
 - Prefer small, focused commits that are easy to review.
 
@@ -71,17 +69,11 @@ We recommend following Conventional Commits, but maintainers may accept other cl
 
 ## Developing & testing
 
-Build core engine (Zig)
-- cd core
-- zig build
-
-Run Zig tests
-- zig build test
-
-Build and run Rust bindings
-- cd bindings
-- cargo test
-- cargo run --example basic_usage
+Build and test Rust core & bindings
+- `cd bindings`
+- `cargo build`
+- `cargo test`
+- `cargo run --release --example stress_test`
 
 Run all tests locally before opening a PR. Include new tests for bug fixes or new features.
 
@@ -158,7 +150,7 @@ Maintainers will acknowledge within a reasonable timeframe and coordinate a fix.
 
 ## License & copyright
 
-By contributing, you confirm that your contributions are made under the project's BSD-3-Clause license (see LICENSE). If your contribution includes third-party code, ensure it is compatible with the project license and clearly attribute it.
+By contributing, you confirm that your contributions are made under the project's GNU Affero General Public License v3.0 (see LICENSE). If your contribution includes third-party code, ensure it is compatible with the project license and clearly attribute it.
 
 ---
 

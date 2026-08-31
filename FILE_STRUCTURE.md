@@ -6,97 +6,50 @@ Understanding how BrowserDB is organized helps developers navigate, contribute, 
 
 ```
 BrowserDB/
-├── 🦀 Core Engine (Rust)          # High-performance database engine
-├── 💡 Examples                    # Usage examples and tutorials
-├── 🛠️ Scripts                     # Build and deployment automation
-└── 📚 Documentation               # User and developer guides
+├── 🦀 Core Engine & Bindings (Rust) # High-performance database engine in `bindings/`
+├── 💡 Examples                      # Usage examples in `bindings/examples/` and root `examples/`
+├── 🛠️ Scripts                       # Build automation scripts in `scripts/`
+└── 📚 Documentation                 # Documentation guides in repository root
 ```
 
 ---
 
 ## 📂 Source Directory (`bindings/src/`)
 
-The heart of BrowserDB - written in Pure Rust for maximum performance and safety.
+The heart of BrowserDB - written in 100% Pure Rust for maximum performance and safety.
 
-### 📄 Core Source Files (`src/core/`)
+### 📄 Core Source Files (`bindings/src/`)
 
-#### `lib.rs` - Library Entry Point
-**Purpose:** Main public API and library initialization.
-
-**Key Responsibilities:**
-- Database lifecycle management (open, close)
-- Table accessors (history, cookies, etc.)
-- Mode switching integration
-
-**Key Functions:**
-```rust
-pub fn open(path: impl AsRef<Path>) -> Result<Self, Error>
-pub fn history(&self) -> HistoryTable<'_>
-```
-
-#### `core/lsm_tree.rs` - Storage Engine
-**Purpose:** Implements the Log-Structured Merge-Tree storage architecture using `BTreeMap` and memory-mapped files.
+#### `lib.rs` - Main Library Entry Point & Table APIs
+**Purpose:** Main public API, table structs (`HistoryTable`, `BookmarksTable`, `CookiesTable`, `CacheTable`, `LocalStoreTable`, `BinaryStoreTable`, `SettingsTable`), multi-tenant container management, and `QueryBuilder`.
 
 **Key Responsibilities:**
-- MemTable (in-memory write buffer, BTreeMap-backed)
-- SSTable (Sorted String Table) management
-- Disk flushing and recovery
-- Binary search across SSTable files
+- Database lifecycle management (`open`, `open_without_locking`, `wipe`, `stats`)
+- Container isolation (`db.container("name")`)
+- Table handles & fluent queries
 
-**Key Structures:**
-```rust
-pub struct LSMTree {
-    pub memtable: RwLock<MemTable>,
-    pub levels: Vec<RwLock<Vec<Arc<SSTable>>>>,
-}
+#### `ffi.rs` - C-Compatible FFI Layer
+**Purpose:** C ABI interface for FFI access from Bun, Deno, C, C++, Node.js, and Python.
 
-pub struct SSTable {
-    pub mmap: Mmap,
-    pub bloom_filter: Option<BloomFilter>,
-    pub index: Vec<IndexEntry>,
-}
-```
+### 📄 Core Storage Subsystems (`bindings/src/core/`)
 
-#### `core/format.rs` - File Format & I/O
-**Purpose:** Defines the universal `.bdb` file format serialization/deserialization.
+#### `core/lsm_tree.rs` - Storage Engine & LSM-Tree
+**Purpose:** Implements 10-level LSM-Tree, sharded MemTable (16 shards), size-tiered compaction cascades, TTL filtering, `increment` merge operators, streaming merge iterators (`self_cell`), and index lookups.
 
-**Key Responsibilities:**
-- Binary format specification
-- CRC32 integrity checking
-- Varint encoding/decoding
+#### `core/blob_log.rs` - WiscKey Blob Log Storage
+**Purpose:** Manages out-of-band blob log files (`.blob`) for values larger than 64KB, keeping SSTables lean and compaction fast.
 
-**File Format Structure:**
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Header (47 bytes: Magic, Version, TableType, etc.)         │
-├─────────────────────────────────────────────────────────────┤
-│ Data Blocks (4096 bytes each, CRC32 protected)             │
-│ ├── Entry Type (1 byte)                                    │
-│ ├── Key Length (Varint) + Key Data                         │
-│ ├── Value Length (Varint) + Value Data                     │
-│ ├── Timestamp (8 bytes)                                    │
-│ └── Entry CRC32 (4 bytes)                                  │
-├─────────────────────────────────────────────────────────────┤
-│ Block Checksums (4 bytes per block)                        │
-├─────────────────────────────────────────────────────────────┤
-│ Footer (60 bytes: Metadata, Offsets, File CRC)             │
-└─────────────────────────────────────────────────────────────┘
-```
+#### `core/wal.rs` - Crash-Resilient Write-Ahead Log
+**Purpose:** Sequential append-only WAL manager with background group-commits (flushing every 5ms or 32KB buffer) and graceful crash recovery.
 
-#### `core/modes.rs` - Mode Management
-**Purpose:** Handles database mode switching (Persistent vs Ultra).
+#### `core/format.rs` - SSTable File Format & Checksums
+**Purpose:** SSTable binary format encoder/decoder, 47-byte header (`BDBFileHeader`), 60-byte footer (`BDBFileFooter`), 4KB block CRC32 checksums, and prefix compression.
 
-**Key Responsibilities:**
-- `PersistentMode`: Disk-backed LSM trees.
-- `UltraMode`: In-memory `HashMap` storage.
-- Atomic mode transitions.
+#### `core/heatmap.rs` - Access Tracking & Bloom Filters
+**Purpose:** 32-shard heat tracking system with decay for hot-data compaction prioritization and Bloom filters for fast SSTable search filtering.
 
-#### `core/heatmap.rs` - Cache System & Bloom Filters
-**Purpose:** Intelligent caching and optimization.
-
-**Key Responsibilities:**
-- Bloom Filters for SSTable lookups (probabilistic checking)
-- Heat tracking for hot data detection
+#### `core/modes.rs` - Execution Modes & Transitions
+**Purpose:** Orchestrates mode switching between `PersistentMode` (LSM-Tree + WAL) and `UltraMode` (in-memory HashMap).
 
 ---
 
