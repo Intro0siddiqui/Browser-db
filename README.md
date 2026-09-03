@@ -9,9 +9,12 @@ BrowserDB is a high-performance, embedded storage engine written in pure Rust. I
 
 When modern JS apps use native databases, passing strings across the FFI boundary triggers heavy memory-copying, SQL parsing, and B-Tree restructuring. BrowserDB drops this overhead to zero using **Mechanical Sympathy**:
 
-* **Zero-Copy Pointers:** Pass memory pointers directly from JS to the Rust core.
-* **Asynchronous WAL Group-Commits:** A background thread safely batches and syncs the Write-Ahead Log (WAL) every 5ms, giving you the speed of RAM with hard-disk durability.
-* **WiscKey Blob Separation:** Small indexed keys are kept in sharded MemTables, while massive string payloads (like 100KB JSON or text) are routed directly to blob storage, cutting FFI copy times entirely.
+* **Zero-Copy Pointers:** Pass memory pointers directly from JS to the Rust core via C-FFI.
+* **Asynchronous WAL Group-Commits:** A background thread safely batches and syncs the Write-Ahead Log (WAL) every 5ms or 32KB buffer, delivering RAM-like latency with hard-disk durability.
+* **WiscKey Blob Separation:** Small indexed keys remain in sharded MemTables, while massive payloads (>64KB) route directly to `.blob` storage to keep SSTables compact.
+* **Sharded Multi-Tenant Containers:** Isolated container storage environments (`db.container("tenant")`) with path sanitization and hardware-protection hooks.
+* **LSM Merge Operators & TTL:** High-throughput `increment` counter delta updates without read-modify-write loops, plus Time-To-Live expiration enforcement.
+* **Native Secondary Indexing & QueryBuilder:** Fast path indexing on structured table fields for accelerated lookup queries (~6.2x to 8x faster than full scans).
 
 ## 📊 Cross-Runtime Benchmarks (10,000 Inserts)
 
@@ -28,10 +31,11 @@ BrowserDB achieves ~50μs per individual write, outperforming native SQLite sync
 
 ## 🏗️ Architecture Under the Hood
 
-* **16-Shard Concurrent MemTables:** Protected by `parking_lot::RwLock` for massive parallel throughput.
-* **Fail-Fast Integrity:** 4KB Block Checksums (CRC32/xxHash) prevent disk rot from returning corrupted pointers.
+* **16-Shard Concurrent MemTables:** Protected by `parking_lot::RwLock` for massive parallel write throughput.
+* **Process-Level Multi-Process Lock:** Safe multi-process coordination via `fs2` (`browserdb.lock`).
+* **Fail-Fast Integrity:** 4KB Block Checksums (CRC32) with BDB headers (47B) and footers (60B) prevent corruption from returning invalid pointers.
 * **Crash-Resilient WAL:** Append-only log with clean tail-discard logic to survive hard `SIGKILL` kernel terminations.
-* **HeatMap Indexing:** Intelligent access-frequency tracking for compaction and cache priority.
+* **32-Shard HeatMap Indexing:** Intelligent access-frequency tracking with atomic decay for compaction sorting and `hot_search` queries.
 
 ## 🚀 Quick Start (JS/TS Runtimes)
 
@@ -63,4 +67,4 @@ cd Browser-db/bindings
 cargo run --release --example stress_test
 
 🔒 License
-GNU General Public License v3.0 (GPL-3.0)
+GNU Affero General Public License v3.0 (AGPL-3.0)

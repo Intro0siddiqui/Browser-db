@@ -35,13 +35,13 @@ cargo test
 ### Basic Usage Example
 
 ```rust
-use browserdb::{BrowserDB, HistoryEntry};
+use browserdb::{BrowserDB, HistoryEntry, LocalStoreEntry};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Open/create a database directory
     let db = BrowserDB::open("my_db")?;
     
-    // 2. Store some data using the type-safe API
+    // 2. Store data in the History table
     db.history().insert(&HistoryEntry {
         timestamp: 1234567890,
         url: "https://rust-lang.org".to_string(),
@@ -50,10 +50,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         visit_count: 1
     })?;
     
-    // 3. Retrieve data
+    // 3. Increment counters atomically via LSM merge operator
+    db.history().increment(123, 1)?;
+
+    // 4. Retrieve data
     if let Some(entry) = db.history().get(123)? {
-        println!("Found: {:?}", entry.title);
+        println!("Found: {:?}, visits: {}", entry.title, entry.visit_count);
     }
+
+    // 5. Use Multi-tenant isolated storage containers
+    let tenant = db.container("user_tenant_1")?;
+    tenant.settings().set("theme", "dark")?;
     
     Ok(())
 }

@@ -18,7 +18,7 @@ Complete API documentation for all BrowserDB functions and types.
 
 ### BrowserDB
 
-Main database orchestrator.
+Main database orchestrator supporting sharded storage containers (multi-tenancy) and global or container-specific table handles.
 
 #### Constructors
 
@@ -26,18 +26,21 @@ Main database orchestrator.
 pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>>
 ```
 
-Opens an existing database or creates a new one at the specified directory path.
+Opens an existing database or creates a new one at the specified directory path, acquiring an exclusive process-level lock via `fs2`.
 
 ```rust
 pub fn open_without_locking<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>>
 ```
 
-Opens the database without acquiring an exclusive process lock.
+Opens the database without acquiring an exclusive process-level lock.
 
-**Examples:**
+#### Multi-Tenant Containers
+
 ```rust
-let db = BrowserDB::open("my_database")?;
+pub fn container(&self, name: &str) -> Result<Arc<Container>, Box<dyn std::error::Error>>
 ```
+
+Gets or creates an isolated storage container (tenant) within the database directory. Container names are sanitized (alphanumeric, `_`, `-`) to prevent path traversal.
 
 #### Operations
 
@@ -45,13 +48,19 @@ let db = BrowserDB::open("my_database")?;
 pub fn set_mode(&self, mode: DatabaseMode) -> Result<(), Box<dyn std::error::Error>>
 ```
 
-Switches between `Persistent` and `Ultra` (RAM) modes.
+Switches all default container storage between `Persistent` (LSM-Tree + WAL) and `Ultra` (In-memory) modes.
 
 ```rust
 pub fn wipe(&self) -> Result<(), Box<dyn std::error::Error>>
 ```
 
-Clears all data from all tables.
+Clears all data from all tables across the default container.
+
+```rust
+pub fn stats(&self) -> Result<DatabaseStats, Box<dyn std::error::Error>>
+```
+
+Returns detailed database statistics.
 
 ---
 
@@ -61,27 +70,45 @@ BrowserDB uses specialized tables for different data types.
 
 ### History Table
 
-Access via `db.history()`.
+Access via `db.history()` or `container.history()`.
 
 ```rust
 pub fn insert(&self, entry: &HistoryEntry) -> Result<(), Box<dyn std::error::Error>>
+pub fn insert_with_ttl(&self, entry: &HistoryEntry, ttl_ms: u64) -> Result<(), Box<dyn std::error::Error>>
+pub fn increment(&self, url_hash: u128, delta: i64) -> Result<(), Box<dyn std::error::Error>>
 pub fn get(&self, url_hash: u128) -> Result<Option<HistoryEntry>, Box<dyn std::error::Error>>
+pub fn hot_search(&self, query: &str, limit: usize) -> Result<Vec<HistoryEntry>, Box<dyn std::error::Error>>
 pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>>
 pub fn wipe_domain(&self, domain: &str) -> Result<usize, Box<dyn std::error::Error>>
 ```
 
+### Bookmarks Table
+
+Access via `db.bookmarks()` or `container.bookmarks()`.
+
+```rust
+pub fn insert(&self, entry: &BookmarkEntry) -> Result<(), Box<dyn std::error::Error>>
+pub fn get_all(&self) -> Result<Vec<BookmarkEntry>, Box<dyn std::error::Error>>
+pub fn delete(&self, url_hash: u128) -> Result<(), Box<dyn std::error::Error>>
+pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>>
+```
+
 ### Cookies Table
 
-Access via `db.cookies()`.
+Access via `db.cookies()` or `container.cookies()`.
 
 ```rust
 pub fn insert(&self, entry: &CookieEntry) -> Result<(), Box<dyn std::error::Error>>
+pub fn get(&self, domain_hash: u128, name: &str) -> Result<Option<CookieEntry>, Box<dyn std::error::Error>>
+pub fn get_by_domain(&self, domain_hash: u128) -> Result<Vec<CookieEntry>, Box<dyn std::error::Error>>
+pub fn get_all(&self) -> Result<Vec<CookieEntry>, Box<dyn std::error::Error>>
+pub fn delete(&self, domain_hash: u128, name: &str) -> Result<(), Box<dyn std::error::Error>>
 pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>>
 ```
 
 ### Cache Table
 
-Access via `db.cache()`.
+Access via `db.cache()` or `container.cache()`.
 
 ```rust
 pub fn insert(&self, entry: &CacheEntry) -> Result<(), Box<dyn std::error::Error>>
@@ -91,19 +118,35 @@ pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>>
 
 ### LocalStore Table
 
-Access via `db.localstore()`.
+Access via `db.localstore()` or `container.localstore()`.
 
 ```rust
 pub fn insert(&self, entry: &LocalStoreEntry) -> Result<(), Box<dyn std::error::Error>>
 pub fn insert_with_index(&self, entry: &LocalStoreEntry, index_fields: &[&str]) -> Result<(), Box<dyn std::error::Error>>
+pub fn get(&self, origin_hash: u128, key: &str) -> Result<Option<LocalStoreEntry>, Box<dyn std::error::Error>>
 pub fn get_by_origin(&self, origin_hash: u128) -> Result<Vec<LocalStoreEntry>, Box<dyn std::error::Error>>
+pub fn remove(&self, origin_hash: u128, key: &str) -> Result<(), Box<dyn std::error::Error>>
+pub fn clear_origin(&self, origin_hash: u128) -> Result<(), Box<dyn std::error::Error>>
 pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>>
 pub fn query(&self) -> QueryBuilder
 ```
 
+### BinaryStore Table
+
+Access via `db.binarystore()` or `container.binarystore()`. Generic byte-slice KV interface.
+
+```rust
+pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>>
+pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>>
+pub fn delete(&self, key: &[u8]) -> Result<(), Box<dyn std::error::Error>>
+pub fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Box<dyn std::error::Error>>
+pub fn all_entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Box<dyn std::error::Error>>
+pub fn count(&self) -> Result<usize, Box<dyn std::error::Error>>
+```
+
 ### Settings Table
 
-Access via `db.settings()`.
+Access via `db.settings()` or `container.settings()`.
 
 ```rust
 pub fn set(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>>

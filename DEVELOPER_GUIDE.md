@@ -20,43 +20,44 @@ Architecture, implementation details, and guidelines for contributors.
 
 BrowserDB is a Pure Rust LSM-tree hybrid engine designed for browser-native performance:
 
-1. **Performance First**: 900k+ reads/sec and 390k+ writes/sec via sharded locking.
-2. **Crash Consistency**: WAL-backed operations with group commits.
-3. **Multi-Mode**: Seamless switching between Persistent (LSM) and Ultra (In-memory) modes.
-4. **Intelligent Indexing**: HeatTracker-driven compaction and access optimization.
+1. **Performance First**: ~900k reads/sec and ~390k writes/sec via 16-shard MemTables and sharded heat tracking.
+2. **Crash Consistency**: WAL-backed operations with background group commits (5ms / 32KB buffer).
+3. **Multi-Tenant Model**: Isolated storage containers per tenant (`db.container("name")`).
+4. **Multi-Mode**: Seamless switching between Persistent (LSM-Tree + WAL) and Ultra (RAM) modes.
+5. **Advanced Engine Features**: Write-side secondary indexing, LSM merge operators (`increment`), TTL enforcement, and WiscKey Blob separation.
 
 ### High-Level Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Application Layer                        │
-│                (Rust Crate / C-FFI / WASM Support)              │
+│                  (Rust Crate / C-FFI / WASM)                    │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────┴───────────────────────────────────┐
-│                       Pure Rust Engine                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │  BrowserDB   │  │  HeatTracker │  │   Mode       │          │
-│  │ Coordinator  │  │  (Sharded)   │  │   Switcher   │          │
-│  └──────────────┘  └──────────────┘  └──────────────┘          │
-│         │                    │                    │           │
-│  ┌──────┴──────────────┐     │                    │           │
-│  │     LSM-Tree        │◄────┘                    │           │
-│  │ (10 Levels + WAL)   │                          │           │
-│  └──────────┬──────────┘                          │           │
-│             │                │                    │           │
-│  ┌──────────▼──────────┐     │                                │
-│  │   Blob Storage      │     │                                │
-│  │  (Large Objects)    │     │                                │
-│  └─────────────────────┘     │                                │
-│                              │                                │
-│  ┌───────────────────────────┼────────────────────────────────┤
-│  │                    File System                             │
-│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐      │
-│  │  │  .wal Files  │ │  .sst Files  │ │  .blob Files │      │
-│  │  │ (Group Commit)│ │ (Mmap Read)  │ │ (Direct I/O) │      │
-│  │  └──────────────┘ └──────────────┘ └──────────────┘      │
-│  └───────────────────────────────────────────────────────────┘
+│                   BrowserDB Engine Core                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐  │
+│  │ Multi-Tenant │  │  HeatTracker │  │     Process Lock       │  │
+│  │ Containers   │  │ (32 Shards)   │  │ (`fs2` browserdb.lock) │  │
+│  └──────────────┘  └──────────────┘  └────────────────────────┘  │
+│         │                    │                    │             │
+│  ┌──────┴──────────────┐     │                    │             │
+│  │ 16-Shard MemTable   │◄────┘                    │             │
+│  │ & 10-Level LSM-Tree │                          │             │
+│  └──────────┬──────────┘                          │             │
+│             │                │                    │             │
+│  ┌──────────▼──────────┐     │                                  │
+│  │   WiscKey BlobLog   │     │                                  │
+│  │ (>64KB Value Direct)│     │                                  │
+│  └─────────────────────┘     │                                  │
+│                              │                                  │
+│  ┌───────────────────────────┼──────────────────────────────────┤
+│  │                    File System                               │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐        │
+│  │  │  .wal Files  │ │  .sst Files  │ │  .blob Files │        │
+│  │  │ (Group Commit)│ │ (Mmap Read)  │ │ (Direct I/O) │        │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘        │
+│  └─────────────────────────────────────────────────────────────┘
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -75,8 +76,21 @@ To minimize lock contention, the MemTable is sharded into 16 independent `BTreeM
 ### 3. WAL Manager (Group Commit)
 The Write-Ahead Log uses a background thread to perform "Group Commits" every 5ms or when the 32KB buffer is full, significantly reducing I/O latency for high-frequency writes.
 
-### 4. HeatTracker
-A sharded access monitoring system that tracks "heat" (access frequency) for keys. It uses 32 independent shards to minimize lock contention and a decay mechanism to ensure that only currently relevant data is considered "hot".
+### 4. HeatTracker & Hot Search
+A sharded access monitoring system that tracks "heat" (access frequency) for keys. It uses 32 independent shards (`Vec<RwLock<HashMap>>`) and atomic decay to minimize lock contention. Heat values drive Level 0 compaction ordering and the `hot_search` API.
+
+### 5. Multi-Tenant Storage Containers
+Isolated storage environments within a single database path. Container names are sanitized to prevent directory traversal (`alphanumeric`, `_`, `-`), each managing its own WAL and table space.
+
+### 6. Process-Level Multi-Process Locking
+Multi-process coordination is enforced at initialization by acquiring an exclusive lock on `browserdb.lock` using the `fs2` crate. Non-locking access is supported via `open_without_locking`.
+
+### 7. LSM Merge Operators & Time-To-Live (TTL)
+- **Merge Operators (`EntryType::Increment`)**: Allows high-throughput counter updates without read-modify-write overhead. 64-bit deltas are aggregated during reads and compacted during LSM merges.
+- **TTL Enforcement**: Support for expiration timestamps (`expires_at` in ms). Expired records are dynamically filtered during reads and permanently reclaimed during compaction and Ultra-mode purges.
+
+### 8. Native Secondary Indexing
+Supports secondary indexing for JSON/field lookups (`insert_with_index`). Write-side index entries are maintained with an `is_index` flag to prevent recursive indexing loops.
 
 ---
 

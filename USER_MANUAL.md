@@ -45,18 +45,32 @@ db.set_mode(browserdb::DatabaseMode::Ultra)?;
 BrowserDB organizes data into specialized tables. Each table provides a type-safe API.
 
 ### Available Tables
-- `history()`: Browsing history
-- `cookies()`: HTTP Cookies
-- `cache()`: Web resources
-- `localstore()`: Origin-based key-value data with indexing
+- `history()`: Browsing history (supports TTL, counters via `increment`, and `hot_search`)
+- `bookmarks()`: Bookmark entries management
+- `cookies()`: HTTP Cookies management with domain-based queries
+- `cache()`: Web resources caching
+- `localstore()`: Origin-based key-value data with secondary indexing and `QueryBuilder`
+- `binarystore()`: Low-level raw byte key-value store with prefix scanning
 - `settings()`: General application preferences
 
-### Basic Operations
+### Multi-Tenant Storage Containers
+BrowserDB supports isolated storage containers (tenants) within a single database path:
+```rust
+let tenant_a = db.container("user_alice")?;
+tenant_a.history().insert(&entry)?;
 
-#### 1. History Table
+let tenant_b = db.container("user_bob")?;
+let alice_history = tenant_a.history().count()?;
+let bob_history = tenant_b.history().count()?;
+```
+
+### Table Examples
+
+#### 1. History Table & Features
 ```rust
 use browserdb::HistoryEntry;
 
+// Standard insert
 db.history().insert(&HistoryEntry {
     timestamp: 1234567890,
     url: "https://example.com".to_string(),
@@ -65,10 +79,32 @@ db.history().insert(&HistoryEntry {
     visit_count: 5,
 })?;
 
-let entry = db.history().get(987654321)?;
+// Insert with Time-To-Live (TTL in milliseconds)
+db.history().insert_with_ttl(&entry, 3600_000)?; // Expires in 1 hour
+
+// Atomic merge counter increment (no read-modify-write needed)
+db.history().increment(987654321, 1)?;
+
+// Heat-ranked search
+let top_matches = db.history().hot_search("example", 10)?;
 ```
 
-#### 2. LocalStore Table (Indexed)
+#### 2. Bookmarks Table
+```rust
+use browserdb::BookmarkEntry;
+
+db.bookmarks().insert(&BookmarkEntry {
+    timestamp: 1234567890,
+    url: "https://rust-lang.org".to_string(),
+    url_hash: 42,
+    title: "Rust Programming Language".to_string(),
+})?;
+
+let all_bookmarks = db.bookmarks().get_all()?;
+db.bookmarks().delete(42)?;
+```
+
+#### 3. LocalStore Table (Indexed)
 ```rust
 use browserdb::LocalStoreEntry;
 
@@ -81,13 +117,24 @@ let entry = LocalStoreEntry {
 // Insert with secondary index on the 'value' field
 db.localstore().insert_with_index(&entry, &["value"])?;
 
-// Query using the index
+// Fast Query using the index
 let results = db.localstore().query()
     .value_eq("{\"theme\": \"dark\"}".to_string())
     .execute()?;
 ```
 
-#### 3. Settings Table
+#### 4. BinaryStore Table (Raw KV)
+```rust
+// Store arbitrary binary key-value data
+db.binarystore().put(b"session:1001".to_vec(), b"auth_token_bytes".to_vec())?;
+
+let token = db.binarystore().get(b"session:1001")?;
+
+// Fast prefix scan
+let sessions = db.binarystore().scan_prefix(b"session:")?;
+```
+
+#### 5. Settings Table
 ```rust
 db.settings().set("app_version", "1.0.0")?;
 let version = db.settings().get("app_version")?;
