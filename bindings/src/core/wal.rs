@@ -139,7 +139,7 @@ where
             }
             Err(e) => {
                 if attempts > 0 || e.kind() == io::ErrorKind::PermissionDenied {
-                    eprintln!("BrowserDB FATAL Windows Lock Error (WAL) after {} attempts: {}", attempts, e);
+                    eprintln!("ZawraDB FATAL Windows Lock Error (WAL) after {} attempts: {}", attempts, e);
                 }
                 return Err(e);
             }

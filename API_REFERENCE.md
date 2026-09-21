@@ -1,6 +1,6 @@
-# 🔧 BrowserDB API Reference
+# 🔧 ZawraDB API Reference
 
-Complete API documentation for all BrowserDB functions and types.
+Complete API documentation for all ZawraDB functions and types.
 
 ## 📋 Table of Contents
 
@@ -16,7 +16,7 @@ Complete API documentation for all BrowserDB functions and types.
 
 ## 🗄️ Core Database API
 
-### BrowserDB
+### ZawraDB
 
 Main database orchestrator supporting sharded storage containers (multi-tenancy) and global or container-specific table handles.
 
@@ -66,7 +66,7 @@ Returns detailed database statistics.
 
 ## 📊 Tables and CRUD
 
-BrowserDB uses specialized tables for different data types.
+ZawraDB uses specialized tables for different data types.
 
 ### History Table
 
@@ -174,12 +174,12 @@ db.localstore().query()
 
 ## ⚙️ Configuration
 
-### BrowserDBConfig
+### ZawraDBConfig
 
-Loaded from `browserdb.toml` in the database directory.
+Loaded from `zawradb.toml` in the database directory.
 
 ```rust
-pub struct BrowserDBConfig {
+pub struct ZawraDBConfig {
     pub lsm_tree: LsmTreeConfig,
     pub heatmap: HeatmapConfig,
 }
@@ -226,32 +226,32 @@ pub struct DatabaseStats {
 
 ## 🔗 C/FFI Bindings
 
-BrowserDB provides a stable C-compatible interface for integration with other languages.
+ZawraDB provides a stable C-compatible interface for integration with other languages.
 
 ```rust
 #[no_mangle]
-pub extern "C" fn browserdb_open(path: *const c_char) -> *mut BrowserDB;
+pub extern "C" fn zawradb_open(path: *const c_char) -> *mut ZawraDB;
 
 #[no_mangle]
-pub extern "C" fn browserdb_close(db: *mut BrowserDB);
+pub extern "C" fn zawradb_close(db: *mut ZawraDB);
 
 #[no_mangle]
-pub extern "C" fn browserdb_history_insert(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_history_insert(
+    db: *mut ZawraDB,
     url: *const c_char,
     title: *const c_char,
     visit_count: u32
 ) -> c_int;
 
 #[no_mangle]
-pub extern "C" fn browserdb_history_get_title(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_history_get_title(
+    db: *mut ZawraDB,
     url_hash_low: u64,
     url_hash_high: u64
 ) -> *mut c_char;
 
 #[no_mangle]
-pub extern "C" fn browserdb_free_string(s: *mut c_char);
+pub extern "C" fn zawradb_free_string(s: *mut c_char);
 ```
 
 ---
@@ -261,7 +261,7 @@ pub extern "C" fn browserdb_free_string(s: *mut c_char);
 The following features are currently in development and are NOT yet available in the stable API:
 
 - **Automatic Repair**: `db.repair()` for corrupted files.
-- **Backup & Restore**: `db.create_backup()` and `BrowserDB::restore_from_backup()`.
+- **Backup & Restore**: `db.create_backup()` and `ZawraDB::restore_from_backup()`.
 - **WebAssembly**: Direct browser-side WASM compilation.
 
 ---
@@ -270,6 +270,6 @@ The following features are currently in development and are NOT yet available in
 
 **[⬅️ Back to Developer Guide](DEVELOPER_GUIDE.md)** | **[🏠 README](README.md)** | **[📚 User Manual](USER_MANUAL.md)**
 
-Complete API reference for all BrowserDB functionality!
+Complete API reference for all ZawraDB functionality!
 
 </div>

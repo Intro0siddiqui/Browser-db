@@ -3,9 +3,9 @@ use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use crc32fast::Hasher;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const MAGIC_BYTES: &[u8; 9] = b"BROWSERDB";
+pub const MAGIC_BYTES: &[u8; 7] = b"ZAWRADB";
 pub const BDB_VERSION: u8 = 2;
-pub const BDB_HEADER_SIZE: usize = 47;
+pub const BDB_HEADER_SIZE: usize = 45;
 pub const BDB_FOOTER_SIZE: usize = 60;
 pub const BDB_BLOCK_SIZE: usize = 4096;
 pub const BDB_RESTART_INTERVAL: usize = 16;
@@ -83,7 +83,7 @@ pub enum EncryptionType {
 
 #[derive(Debug, Clone)]
 pub struct BDBFileHeader {
-    pub magic: [u8; 9],
+    pub magic: [u8; 7],
     pub version: u8,
     pub created_at: u64,
     pub modified_at: u64,
@@ -152,7 +152,7 @@ impl BDBFileHeader {
     }
 
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut magic = [0u8; 9];
+        let mut magic = [0u8; 7];
         reader.read_exact(&mut magic)?;
         if &magic != MAGIC_BYTES {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid Magic Bytes"));

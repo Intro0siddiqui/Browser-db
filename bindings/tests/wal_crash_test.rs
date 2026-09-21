@@ -1,5 +1,5 @@
-use browserdb::core::wal::WALManager;
-use browserdb::core::format::{BDBLogEntry, EntryType};
+use zawradb::core::wal::WALManager;
+use zawradb::core::format::{BDBLogEntry, EntryType};
 use tempfile::tempdir;
 use std::fs::OpenOptions;
 use std::io::Write;

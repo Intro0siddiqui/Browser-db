@@ -1,7 +1,7 @@
-# 📊 BrowserDB Documentation Audit & Analysis Report
+# 📊 ZawraDB Documentation Audit & Analysis Report
 
 ## 🛠 Overview
-This report documents the discrepancies found between the legacy documentation and the actual implementation of BrowserDB, and summarizes the updates made to sync them.
+This report documents the discrepancies found between the legacy documentation and the actual implementation of ZawraDB, and summarizes the updates made to sync them.
 
 ---
 
@@ -13,7 +13,7 @@ This report documents the discrepancies found between the legacy documentation a
 - **Action**: Updated all documentation to reflect the significantly higher actual performance.
 
 ### 2. Core API Structure
-- **Legacy Docs**: Described a generic `put(key, value)` / `get(key)` API on the main `BrowserDB` object and missed several tables/operations (`bookmarks`, `binarystore`, multi-tenant containers, TTL inserts, atomic merge increments, `hot_search`).
+- **Legacy Docs**: Described a generic `put(key, value)` / `get(key)` API on the main `ZawraDB` object and missed several tables/operations (`bookmarks`, `binarystore`, multi-tenant containers, TTL inserts, atomic merge increments, `hot_search`).
 - **Actual Implementation**: Uses a specialized table-based API (`db.history()`, `db.bookmarks()`, `db.cookies()`, `db.cache()`, `db.localstore()`, `db.binarystore()`, `db.settings()`), multi-tenant container isolation (`db.container("tenant")`), TTL inserts, atomic merge increments (`increment`), heat-ranked searches (`hot_search`), and `fs2` process locking.
 - **Action**: Completely updated `API_REFERENCE.md`, `USER_MANUAL.md`, `DEVELOPER_GUIDE.md`, `README.md`, `QUICK_START.md`, and `FILE_STRUCTURE.md` to reflect all table models, container isolation, and advanced storage features.
 

@@ -1,13 +1,13 @@
 [package]
-name = "browserdb"
+name = "zawradb"
 version = "0.1.0"
 edition = "2021"
 description = "High-performance pure Rust browser database"
-authors = ["BrowserDB Team"]
+authors = ["ZawraDB Team"]
 license = "AGPL-3.0-only"
 
 [lib]
-name = "browserdb"
+name = "zawradb"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]

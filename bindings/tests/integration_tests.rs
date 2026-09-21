@@ -1,6 +1,6 @@
-//! BrowserDB Rust integration tests
+//! ZawraDB Rust integration tests
 
-use browserdb::*;
+use zawradb::*;
 use tempfile::tempdir;
 
 #[test]
@@ -9,7 +9,7 @@ fn test_database_creation_and_basic_operations() {
     let db_path = temp_dir.path().join("test.bdb");
     
     // 创建数据库
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
     
     // 测试基本统计信息
     let stats = db.stats().expect("Failed to get stats");
@@ -47,7 +47,7 @@ fn test_localstorage_query_builder() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("localstore_query_test.bdb");
 
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
 
     let entry1 = LocalStoreEntry {
         origin_hash: 0x1,
@@ -89,7 +89,7 @@ fn test_cookie_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("cookie_test.bdb");
     
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
     
     let cookie = CookieEntry {
         domain_hash: 0xabcdef1234567890,
@@ -118,7 +118,7 @@ fn test_cache_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("cache_test.bdb");
     
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
     
     let cache_entry = CacheEntry {
         url_hash: 0x1111222233334444,
@@ -149,7 +149,7 @@ fn test_localstorage_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("localstore_test.bdb");
     
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
     
     let localstore_entry = LocalStoreEntry {
         origin_hash: 0x5555666677778888,
@@ -174,7 +174,7 @@ fn test_settings_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("settings_test.bdb");
     
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
     
     // 设置配置项
     db.settings().set("theme", "dark").expect("Failed to set theme");
@@ -193,7 +193,7 @@ fn test_privacy_wipe_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("privacy_test.bdb");
     
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
     
     // 插入测试数据
     let history_entry = HistoryEntry {
@@ -222,7 +222,7 @@ fn test_performance_operations() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("perf_test.bdb");
     
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
     
     // 批量插入历史记录进行性能测试
     let start_time = std::time::Instant::now();
@@ -261,7 +261,7 @@ fn test_database_wipe() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("wipe_test.bdb");
     
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
     
     // 插入一些数据
     let entry = HistoryEntry {
@@ -294,7 +294,7 @@ fn test_database_mode_switching() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("mode_test.bdb");
     
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
     
     // 测试Persistent模式
     db.set_mode(DatabaseMode::Persistent).expect("Failed to set persistent mode");
@@ -308,7 +308,7 @@ fn test_error_handling() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("error_test.bdb");
     
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
     
     // 测试不存在的URL哈希查询
     let result = db.history().get(0x9999999999999999);

@@ -1,13 +1,13 @@
-# BrowserDB 项目配置
+# ZawraDB 项目配置
 
 [project]
-name = "BrowserDB"
+name = "ZawraDB"
 version = "0.1.0"
 description = "High-performance browser database with LSM-tree hybrid architecture"
-authors = ["BrowserDB Team"]
+authors = ["ZawraDB Team"]
 license = "BSD-3-Clause"
-repository = "https://github.com/browserdb/browserdb"
-homepage = "https://browserdb.dev"
+repository = "https://github.com/zawradb/zawradb"
+homepage = "https://zawradb.dev"
 
 [build]
 # Rust 配置  
@@ -39,9 +39,9 @@ native_relational_kv = true
 
 [paths]
 # 路径配置
-default_db_path = "~/.browserdb"
-temp_db_path = "/tmp/browserdb"
-test_db_path = "/tmp/browserdb-test"
+default_db_path = "~/.zawradb"
+temp_db_path = "/tmp/zawradb"
+test_db_path = "/tmp/zawradb-test"
 
 # 文件扩展名
 history_file = "history.bdb"

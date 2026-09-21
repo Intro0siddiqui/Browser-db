@@ -1,6 +1,6 @@
-# 🚀 BrowserDB Quick Start Guide
+# 🚀 ZawraDB Quick Start Guide
 
-Get up and running with BrowserDB in 2 minutes!
+Get up and running with ZawraDB in 2 minutes!
 
 ## 📋 Prerequisites
 
@@ -16,8 +16,8 @@ cargo --version  # Should be 1.75+
 
 ### Step 1: Clone the Repository
 ```bash
-git clone https://github.com/browserdb/browserdb.git
-cd browserdb/bindings
+git clone https://github.com/zawradb/zawradb.git
+cd zawradb/bindings
 ```
 
 ### Step 2: Build the Project
@@ -35,11 +35,11 @@ cargo test
 ### Basic Usage Example
 
 ```rust
-use browserdb::{BrowserDB, HistoryEntry, LocalStoreEntry};
+use zawradb::{ZawraDB, HistoryEntry, LocalStoreEntry};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Open/create a database directory
-    let db = BrowserDB::open("my_db")?;
+    let db = ZawraDB::open("my_db")?;
     
     // 2. Store data in the History table
     db.history().insert(&HistoryEntry {
@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 🏃‍♂️ Performance Check
 
-Run the built-in stress test to see BrowserDB in action:
+Run the built-in stress test to see ZawraDB in action:
 
 ```bash
 cargo run --release --example stress_test
@@ -80,6 +80,6 @@ cargo run --release --example stress_test
 
 **[⬅️ Back to README](README.md)** | **[📚 User Manual](USER_MANUAL.md)** | **[🛠️ Developer Guide](DEVELOPER_GUIDE.md)**
 
-🎉 **Congratulations! You're now ready to build amazing applications with BrowserDB!**
+🎉 **Congratulations! You're now ready to build amazing applications with ZawraDB!**
 
 </div>

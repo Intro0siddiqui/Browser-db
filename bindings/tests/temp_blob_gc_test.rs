@@ -1,6 +1,6 @@
-use browserdb::core::lsm_tree::LSMTree;
-use browserdb::core::format::TableType;
-use browserdb::core::config::BrowserDBConfig;
+use zawradb::core::lsm_tree::LSMTree;
+use zawradb::core::format::TableType;
+use zawradb::core::config::ZawraDBConfig;
 use tempfile::tempdir;
 use std::fs;
 use std::io;
@@ -9,7 +9,7 @@ use std::io;
 fn test_blob_garbage_collection() {
     let dir = tempdir().unwrap();
     let path = dir.path();
-    let config = BrowserDBConfig::default();
+    let config = ZawraDBConfig::default();
 
     // 1. Initialize LSMTree
     let lsm_tree = LSMTree::new(path, TableType::History, 10 * 1024 * 1024, config).unwrap();
@@ -36,7 +36,7 @@ fn test_blob_garbage_collection() {
     assert!(size_before >= 300 * 1024, "File size should be at least 300KB, got {}", size_before);
 
     // 5.1 Verify Iterator
-    use browserdb::core::blob_log::BlobLogIterator;
+    use zawradb::core::blob_log::BlobLogIterator;
     let iter = BlobLogIterator::new(&blob_file_path).unwrap();
     let entries: Vec<_> = iter.collect::<io::Result<Vec<_>>>().unwrap();
     assert_eq!(entries.len(), 3, "Should have 3 blob entries (A1, B, A2)");

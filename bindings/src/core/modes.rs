@@ -7,7 +7,7 @@ use crate::core::lsm_tree::LSMTree;
 use crate::core::format::TableType;
 
 use std::fmt;
-use crate::core::config::BrowserDBConfig;
+use crate::core::config::ZawraDBConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseMode {
@@ -37,7 +37,7 @@ pub struct ModeConfig {
     pub max_memory: usize,
     pub enable_compression: bool,
     pub enable_heat_tracking: bool,
-    pub ext_config: BrowserDBConfig,
+    pub ext_config: ZawraDBConfig,
 }
 
 pub type UltraEntry = (Vec<u8>, u64);

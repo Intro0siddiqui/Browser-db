@@ -1,11 +1,11 @@
-use browserdb::BrowserDB;
-use browserdb::LocalStoreEntry;
+use zawradb::ZawraDB;
+use zawradb::LocalStoreEntry;
 use tempfile::tempdir;
 
 #[test]
 fn test_index_logic_structure() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path().to_str().unwrap()).unwrap();
+    let db = ZawraDB::open(dir.path().to_str().unwrap()).unwrap();
 
     let entry = LocalStoreEntry {
         origin_hash: 123,
@@ -29,7 +29,7 @@ fn test_index_logic_structure() {
 #[test]
 fn test_insert_with_index_filters_by_field() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path().to_str().unwrap()).unwrap();
+    let db = ZawraDB::open(dir.path().to_str().unwrap()).unwrap();
 
     // Only the `key` index should be built; the `value` index must be absent.
     let entry = LocalStoreEntry {
@@ -65,7 +65,7 @@ fn test_insert_with_index_filters_by_field() {
 #[test]
 fn test_insert_with_index_unknown_field_errors() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path().to_str().unwrap()).unwrap();
+    let db = ZawraDB::open(dir.path().to_str().unwrap()).unwrap();
 
     let entry = LocalStoreEntry {
         origin_hash: 1,

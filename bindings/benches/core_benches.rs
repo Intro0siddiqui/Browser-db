@@ -1,8 +1,8 @@
 use criterion::{criterion_group, criterion_main, Criterion, BatchSize};
-use browserdb::core::lsm_tree::{LSMTree, MemTable};
-use browserdb::core::format::{EntryType, TableType, BDBLogEntry};
-use browserdb::core::wal::WALManager;
-use browserdb::core::config::BrowserDBConfig;
+use zawradb::core::lsm_tree::{LSMTree, MemTable};
+use zawradb::core::format::{EntryType, TableType, BDBLogEntry};
+use zawradb::core::wal::WALManager;
+use zawradb::core::config::ZawraDBConfig;
 use tempfile::tempdir;
 use rand::Rng;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ fn bench_wal_logging(c: &mut Criterion) {
 
 fn bench_compaction_speed(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let tree = LSMTree::new(dir.path(), TableType::LocalStore, 1024 * 1024, BrowserDBConfig::default()).unwrap();
+    let tree = LSMTree::new(dir.path(), TableType::LocalStore, 1024 * 1024, ZawraDBConfig::default()).unwrap();
 
     // Populate some data
     for i in 0..1000 {
@@ -81,7 +81,7 @@ fn bench_compaction_speed(c: &mut Criterion) {
 
 fn bench_compaction_stall(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let tree = Arc::new(LSMTree::new(dir.path(), TableType::LocalStore, 1024 * 1024, BrowserDBConfig::default()).unwrap());
+    let tree = Arc::new(LSMTree::new(dir.path(), TableType::LocalStore, 1024 * 1024, ZawraDBConfig::default()).unwrap());
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let tree_bg = Arc::clone(&tree);

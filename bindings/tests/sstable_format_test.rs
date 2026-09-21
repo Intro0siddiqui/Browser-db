@@ -1,6 +1,6 @@
-use browserdb::core::lsm_tree::LSMTree;
-use browserdb::core::format::TableType;
-use browserdb::core::config::BrowserDBConfig;
+use zawradb::core::lsm_tree::LSMTree;
+use zawradb::core::format::TableType;
+use zawradb::core::config::ZawraDBConfig;
 use tempfile::tempdir;
 use std::fs;
 use std::io::Read;
@@ -8,7 +8,7 @@ use std::io::Read;
 #[test]
 fn test_sstable_header_footer_presence() {
     let dir = tempdir().unwrap();
-    let tree = LSMTree::new(dir.path(), TableType::LocalStore, 1024, BrowserDBConfig::default()).unwrap();
+    let tree = LSMTree::new(dir.path(), TableType::LocalStore, 1024, ZawraDBConfig::default()).unwrap();
 
     // Insert some data and flush to create SSTable
     tree.put(b"key1".to_vec(), b"value1".to_vec()).unwrap();
@@ -30,8 +30,8 @@ fn test_sstable_header_footer_presence() {
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer).unwrap();
 
-    // Check Header (First 9 bytes should be magic "BROWSERDB")
-    assert_eq!(&buffer[0..9], b"BROWSERDB");
+    // Check Header (First 7 bytes should be magic "ZAWRADB")
+    assert_eq!(&buffer[0..7], b"ZAWRADB");
 
     // Check Footer (Last 48 bytes - we'll just check it's there and the file is large enough)
     assert!(buffer.len() >= 48 + 48); // Header + Footer minimum

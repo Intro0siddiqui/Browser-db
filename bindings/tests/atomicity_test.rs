@@ -1,6 +1,6 @@
-use browserdb::core::lsm_tree::LSMTree;
-use browserdb::core::format::{EntryType, TableType, BDBLogEntry};
-use browserdb::core::config::BrowserDBConfig;
+use zawradb::core::lsm_tree::LSMTree;
+use zawradb::core::format::{EntryType, TableType, BDBLogEntry};
+use zawradb::core::config::ZawraDBConfig;
 use tempfile::tempdir;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -32,7 +32,7 @@ fn test_batch_atomicity_on_recovery() {
     }
 
     // Open LSMTree and check recovery
-    let tree = LSMTree::new(dir.path(), TableType::LocalStore, 1024 * 1024, BrowserDBConfig::default()).unwrap();
+    let tree = LSMTree::new(dir.path(), TableType::LocalStore, 1024 * 1024, ZawraDBConfig::default()).unwrap();
 
     assert!(tree.get(b"key1").is_some());
     assert!(tree.get(b"key2").is_none());

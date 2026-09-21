@@ -1,19 +1,19 @@
-//! BrowserDB 基础使用示例
+//! ZawraDB 基础使用示例
 //! 
-//! 这个文件展示了如何使用BrowserDB进行基本的数据库操作。
+//! 这个文件展示了如何使用ZawraDB进行基本的数据库操作。
 
-use browserdb::*;
+use zawradb::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化日志
     tracing_subscriber::fmt::init();
     
-    println!("🚀 BrowserDB 基础使用示例");
+    println!("🚀 ZawraDB 基础使用示例");
     println!("============================\n");
     
     // 1. 创建数据库
-    let db = BrowserDB::open("/tmp/example.bdb")?;
+    let db = ZawraDB::open("/tmp/example.bdb")?;
     println!("✅ 数据库已创建");
     
     // 2. 基本历史记录操作
@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis(),
         url_hash: 0x123456789abcdef0,
-        title: "BrowserDB 官方文档".to_string(),
+        title: "ZawraDB 官方文档".to_string(),
         visit_count: 1,
     };
     
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache_entry = CacheEntry {
         url_hash: 0x1111222233334444,
         headers: "Content-Type: text/html; charset=utf-8".to_string(),
-        body: "<!DOCTYPE html><html><head><title>示例页面</title></head><body><h1>BrowserDB 缓存示例</h1></body></html>".as_bytes().to_vec(),
+        body: "<!DOCTYPE html><html><head><title>示例页面</title></head><body><h1>ZawraDB 缓存示例</h1></body></html>".as_bytes().to_vec(),
         etag: "W/\"abc123\"".to_string(),
         last_modified: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -104,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🔍 搜索操作示例:");
     
     // 热查询 - 基于访问频率
-    let hot_results = db.history().hot_search("BrowserDB", 10)?;
+    let hot_results = db.history().hot_search("ZawraDB", 10)?;
     println!("🔥 热查询结果: {} 条记录", hot_results.len());
     
     // 8. 统计信息

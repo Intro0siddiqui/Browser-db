@@ -1,11 +1,11 @@
-# 📁 BrowserDB File Structure Guide
+# 📁 ZawraDB File Structure Guide
 
-Understanding how BrowserDB is organized helps developers navigate, contribute, and extend the codebase.
+Understanding how ZawraDB is organized helps developers navigate, contribute, and extend the codebase.
 
 ## 🏗️ Project Architecture Overview
 
 ```
-BrowserDB/
+ZawraDB/
 ├── 🦀 Core Engine & Bindings (Rust) # High-performance database engine in `bindings/`
 ├── 💡 Examples                      # Usage examples in `bindings/examples/` and root `examples/`
 ├── 🛠️ Scripts                       # Build automation scripts in `scripts/`
@@ -16,7 +16,7 @@ BrowserDB/
 
 ## 📂 Source Directory (`bindings/src/`)
 
-The heart of BrowserDB - written in 100% Pure Rust for maximum performance and safety.
+The heart of ZawraDB - written in 100% Pure Rust for maximum performance and safety.
 
 ### 📄 Core Source Files (`bindings/src/`)
 

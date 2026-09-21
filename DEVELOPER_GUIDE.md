@@ -1,4 +1,4 @@
-# 🛠️ BrowserDB Developer Guide
+# 🛠️ ZawraDB Developer Guide
 
 Architecture, implementation details, and guidelines for contributors.
 
@@ -18,7 +18,7 @@ Architecture, implementation details, and guidelines for contributors.
 
 ### System Design Philosophy
 
-BrowserDB is a Pure Rust LSM-tree hybrid engine designed for browser-native performance:
+ZawraDB is a Pure Rust LSM-tree hybrid engine designed for browser-native performance:
 
 1. **Performance First**: ~900k reads/sec and ~390k writes/sec via 16-shard MemTables and sharded heat tracking.
 2. **Crash Consistency**: WAL-backed operations with background group commits (5ms / 32KB buffer).
@@ -35,10 +35,10 @@ BrowserDB is a Pure Rust LSM-tree hybrid engine designed for browser-native perf
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────┴───────────────────────────────────┐
-│                   BrowserDB Engine Core                         │
+│                   ZawraDB Engine Core                         │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐  │
 │  │ Multi-Tenant │  │  HeatTracker │  │     Process Lock       │  │
-│  │ Containers   │  │ (32 Shards)   │  │ (`fs2` browserdb.lock) │  │
+│  │ Containers   │  │ (32 Shards)   │  │ (`fs2` zawradb.lock) │  │
 │  └──────────────┘  └──────────────┘  └────────────────────────┘  │
 │         │                    │                    │             │
 │  ┌──────┴──────────────┐     │                    │             │
@@ -83,7 +83,7 @@ A sharded access monitoring system that tracks "heat" (access frequency) for key
 Isolated storage environments within a single database path. Container names are sanitized to prevent directory traversal (`alphanumeric`, `_`, `-`), each managing its own WAL and table space.
 
 ### 6. Process-Level Multi-Process Locking
-Multi-process coordination is enforced at initialization by acquiring an exclusive lock on `browserdb.lock` using the `fs2` crate. Non-locking access is supported via `open_without_locking`.
+Multi-process coordination is enforced at initialization by acquiring an exclusive lock on `zawradb.lock` using the `fs2` crate. Non-locking access is supported via `open_without_locking`.
 
 ### 7. LSM Merge Operators & Time-To-Live (TTL)
 - **Merge Operators (`EntryType::Increment`)**: Allows high-throughput counter updates without read-modify-write overhead. 64-bit deltas are aggregated during reads and compacted during LSM merges.
@@ -100,7 +100,7 @@ Supports secondary indexing for JSON/field lookups (`insert_with_index`). Write-
 To prevent LSM-tree bloat, values larger than 64KB are automatically redirected to the Blob Storage. The LSM-tree stores a small `BlobPointer` instead of the actual data, keeping SSTables compact and efficient for scanning.
 
 ### C/FFI Layer (`ffi.rs`)
-BrowserDB exports a stable C-compatible API, allowing it to be used from C, C++, Python, or Node.js. It handles string conversions and memory management across the FFI boundary safely.
+ZawraDB exports a stable C-compatible API, allowing it to be used from C, C++, Python, or Node.js. It handles string conversions and memory management across the FFI boundary safely.
 
 ---
 

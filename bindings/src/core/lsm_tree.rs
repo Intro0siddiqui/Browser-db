@@ -644,7 +644,7 @@ where
             }
             Err(e) => {
                 if attempts > 0 || e.kind() == io::ErrorKind::PermissionDenied {
-                    eprintln!("BrowserDB FATAL Windows Lock Error after {} attempts: {}", attempts, e);
+                    eprintln!("ZawraDB FATAL Windows Lock Error after {} attempts: {}", attempts, e);
                 }
                 return Err(e);
             }
@@ -1120,7 +1120,7 @@ pub struct LSMTreeInner {
     pub wal: RwLock<WALManager>,
     pub blob_log: Arc<BlobLog>,
     pub heat_tracker: HeatTracker,
-    pub config: crate::core::config::BrowserDBConfig,
+    pub config: crate::core::config::ZawraDBConfig,
     pub indices: Vec<IndexDefinitionInternal>,
     pub is_index: bool,
     pub last_active_time: Arc<AtomicU64>,
@@ -1143,7 +1143,7 @@ pub struct IndexDefinitionInternal {
 }
 
 impl LSMTree {
-    pub fn new(base_path: &Path, table_type: TableType, max_memtable_size: usize, config: crate::core::config::BrowserDBConfig) -> io::Result<Self> {
+    pub fn new(base_path: &Path, table_type: TableType, max_memtable_size: usize, config: crate::core::config::ZawraDBConfig) -> io::Result<Self> {
         Self::new_with_indices(base_path, table_type, max_memtable_size, config, Vec::new())
     }
 
@@ -1151,7 +1151,7 @@ impl LSMTree {
         base_path: &Path,
         table_type: TableType,
         max_memtable_size: usize,
-        config: crate::core::config::BrowserDBConfig,
+        config: crate::core::config::ZawraDBConfig,
         index_defs: Vec<IndexDefinition>
     ) -> io::Result<Self> {
         Self::new_internal(base_path, table_type, max_memtable_size, config, index_defs, false)
@@ -1161,7 +1161,7 @@ impl LSMTree {
         base_path: &Path,
         table_type: TableType,
         max_memtable_size: usize,
-        config: crate::core::config::BrowserDBConfig,
+        config: crate::core::config::ZawraDBConfig,
     ) -> io::Result<Self> {
         Self::new_internal(base_path, table_type, max_memtable_size, config, Vec::new(), true)
     }
@@ -1170,7 +1170,7 @@ impl LSMTree {
         base_path: &Path,
         table_type: TableType,
         max_memtable_size: usize,
-        config: crate::core::config::BrowserDBConfig,
+        config: crate::core::config::ZawraDBConfig,
         index_defs: Vec<IndexDefinition>,
         is_index: bool,
     ) -> io::Result<Self> {
@@ -1763,7 +1763,7 @@ impl LSMTree {
                 } else if *t == EntryType::Delete {
                     // If we delete a record, we should ideally delete the index entry too.
                     // However, without the old value, we can't know the index key.
-                    // For now, BrowserDB indices will be "lazy-cleaned" or require manual management
+                    // For now, ZawraDB indices will be "lazy-cleaned" or require manual management
                     // if they are not purely based on the key.
                     // But for pure "Write-Side Indexing" as requested, we handle inserts.
                 }

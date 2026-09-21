@@ -1,6 +1,6 @@
-# Contributing to Browser-db
+# Contributing to ZawraDB
 
-Thanks for your interest in contributing to Browser-db — we appreciate your help! This document explains how to report issues, propose changes, and submit pull requests so we can collaborate efficiently.
+Thanks for your interest in contributing to ZawraDB — we appreciate your help! This document explains how to report issues, propose changes, and submit pull requests so we can collaborate efficiently.
 
 ---
 
@@ -19,7 +19,7 @@ Thanks for your interest in contributing to Browser-db — we appreciate your he
 ---
 
 ## Who can contribute
-Everyone is welcome. Whether you're fixing a typo, adding features, improving docs, or writing tests, contributions of all sizes help make Browser-db better.
+Everyone is welcome. Whether you're fixing a typo, adding features, improving docs, or writing tests, contributions of all sizes help make ZawraDB better.
 
 ---
 
@@ -32,10 +32,10 @@ Please follow common open-source community standards. Be respectful, inclusive, 
 
 1. Fork the repository to your GitHub account.
 2. Clone your fork:
-   git clone https://github.com/<your-username>/Browser-db.git
-   cd Browser-db
+   git clone https://github.com/<your-username>/ZawraDB.git
+   cd ZawraDB
 3. Add the upstream remote and keep your fork in sync:
-   git remote add upstream https://github.com/Intro0siddiqui/Browser-db.git
+   git remote add upstream https://github.com/Intro0siddiqui/ZawraDB.git
    git fetch upstream
 
 Prerequisites (for development)
@@ -92,7 +92,7 @@ Formatting & linting
 2. Push your branch to your fork:
    git push origin <branch-name>
 
-3. Open a Pull Request against Intro0siddiqui/Browser-db main branch.
+3. Open a Pull Request against Intro0siddiqui/ZawraDB main branch.
 
 PR checklist
 - [ ] Clear, descriptive title and description explaining the motivation and changes.
@@ -142,8 +142,8 @@ Maintainers will acknowledge within a reasonable timeframe and coordinate a fix.
 
 ## Communication & support
 
-- Issues: https://github.com/Intro0siddiqui/Browser-db/issues
-- Discussions (if enabled): https://github.com/Intro0siddiqui/Browser-db/discussions
+- Issues: https://github.com/Intro0siddiqui/ZawraDB/issues
+- Discussions (if enabled): https://github.com/Intro0siddiqui/ZawraDB/discussions
 - For quick questions, check existing issues/discussions before opening new ones.
 
 ---
@@ -156,6 +156,6 @@ By contributing, you confirm that your contributions are made under the project'
 
 ## Thanks & acknowledgements
 
-Thanks for taking the time to contribute — your efforts make Browser-db better for everyone. If you'd like help finding something to work on, check the issue tracker for "good first issue" or "help wanted" labels, or ask in Discussions.
+Thanks for taking the time to contribute — your efforts make ZawraDB better for everyone. If you'd like help finding something to work on, check the issue tracker for "good first issue" or "help wanted" labels, or ask in Discussions.
 
 Happy hacking!

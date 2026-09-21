@@ -1,13 +1,13 @@
-use browserdb::core::lsm_tree::LSMTree;
-use browserdb::core::format::TableType;
-use browserdb::core::config::BrowserDBConfig;
+use zawradb::core::lsm_tree::LSMTree;
+use zawradb::core::format::TableType;
+use zawradb::core::config::ZawraDBConfig;
 use tempfile::tempdir;
 
 #[test]
 fn test_blob_separation() {
     let dir = tempdir().unwrap();
     let path = dir.path();
-    let config = BrowserDBConfig::default();
+    let config = ZawraDBConfig::default();
 
     let lsm_tree = LSMTree::new(path, TableType::History, 1024 * 1024, config).unwrap();
 
@@ -41,7 +41,7 @@ fn test_blob_separation() {
 fn test_blob_after_flush() {
     let dir = tempdir().unwrap();
     let path = dir.path();
-    let config = BrowserDBConfig::default();
+    let config = ZawraDBConfig::default();
 
     let lsm_tree = LSMTree::new(path, TableType::History, 1024 * 1024, config).unwrap();
 
