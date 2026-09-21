@@ -1,13 +1,13 @@
-# BrowserDB 🚀
+# ZawraDB 🚀
 **A specialized, zero-copy Relational KV engine designed to bypass the JavaScript FFI boundary tax.**
 
-BrowserDB is a high-performance, embedded storage engine written in pure Rust. It was built specifically to eliminate the SQL parsing bloat and synchronous disk-lock latency (`fsync`) that bottlenecks traditional embedded databases (like SQLite) when accessed via FFI in runtimes like **Bun** and **Deno**.
+ZawraDB is a high-performance, embedded storage engine written in pure Rust. It was built specifically to eliminate the SQL parsing bloat and synchronous disk-lock latency (`fsync`) that bottlenecks traditional embedded databases (like SQLite) when accessed via FFI in runtimes like **Bun** and **Deno**.
 
 [Rust] [Bun] [Deno] [License: GPL-v3]
 
 ## ⚡ The FFI Bottleneck (And How We Fix It)
 
-When modern JS apps use native databases, passing strings across the FFI boundary triggers heavy memory-copying, SQL parsing, and B-Tree restructuring. BrowserDB drops this overhead to zero using **Mechanical Sympathy**:
+When modern JS apps use native databases, passing strings across the FFI boundary triggers heavy memory-copying, SQL parsing, and B-Tree restructuring. ZawraDB drops this overhead to zero using **Mechanical Sympathy**:
 
 * **Zero-Copy Pointers:** Pass memory pointers directly from JS to the Rust core via C-FFI.
 * **Asynchronous WAL Group-Commits:** A background thread safely batches and syncs the Write-Ahead Log (WAL) every 5ms or 32KB buffer, delivering RAM-like latency with hard-disk durability.
@@ -18,7 +18,7 @@ When modern JS apps use native databases, passing strings across the FFI boundar
 
 ## 📊 Cross-Runtime Benchmarks (10,000 Inserts)
 
-BrowserDB achieves ~50μs per individual write, outperforming native SQLite synchronous inserts by over 50x in JavaScript environments.
+ZawraDB achieves ~50μs per individual write, outperforming native SQLite synchronous inserts by over 50x in JavaScript environments.
 
 | Test Case / Metric | Bun Runtime | Deno Runtime | Native SQLite |
 | :--- | :--- | :--- | :--- |
@@ -27,33 +27,33 @@ BrowserDB achieves ~50μs per individual write, outperforming native SQLite sync
 | **1M FFI Call Leak Test** | **PASSED** (Flat) | **PASSED** (Flat) | *N/A* |
 | **SIGKILL Crash Recovery** | **PASSED** | **PASSED** | *Safe* |
 
-*(For complete runtime testing scripts, see our integration repo: [browserdb-runtime-bench](https://github.com/Intro0siddiqui/browserdb-runtime-bench))*
+*(For complete runtime testing scripts, see our integration repo: [zawradb-runtime-bench](https://github.com/Intro0siddiqui/zawradb-runtime-bench))*
 
 ## 🏗️ Architecture Under the Hood
 
 * **16-Shard Concurrent MemTables:** Protected by `parking_lot::RwLock` for massive parallel write throughput.
-* **Process-Level Multi-Process Lock:** Safe multi-process coordination via `fs2` (`browserdb.lock`).
+* **Process-Level Multi-Process Lock:** Safe multi-process coordination via `fs2` (`zawradb.lock`).
 * **Fail-Fast Integrity:** 4KB Block Checksums (CRC32) with BDB headers (47B) and footers (60B) prevent corruption from returning invalid pointers.
 * **Crash-Resilient WAL:** Append-only log with clean tail-discard logic to survive hard `SIGKILL` kernel terminations.
 * **32-Shard HeatMap Indexing:** Intelligent access-frequency tracking with atomic decay for compaction sorting and `hot_search` queries.
 
 ## 🚀 Quick Start (JS/TS Runtimes)
 
-BrowserDB is designed to be called directly via native FFI. No heavy ORMs, no SQL strings.
+ZawraDB is designed to be called directly via native FFI. No heavy ORMs, no SQL strings.
 
 ```typescript
 import { dlopen, FFIType, suffix } from "bun:ffi";
 
 // 1. Load the compiled Rust binary
-const { symbols } = dlopen(`./libbrowserdb.${suffix}`, {
-  browserdb_insert: { 
+const { symbols } = dlopen(`./libzawradb.${suffix}`, {
+  zawradb_insert: {
     args: [FFIType.ptr, FFIType.cstring, FFIType.cstring], 
     returns: FFIType.i32 
   }
 });
 
 // 2. Call it directly like a native JS function (Zero-copy)
-symbols.browserdb_insert(
+symbols.zawradb_insert(
   dbPointer, 
   Buffer.from("user_101\0"), 
   Buffer.from("High-performance payload data...\0")

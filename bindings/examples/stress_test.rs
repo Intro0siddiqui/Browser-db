@@ -1,4 +1,4 @@
-use browserdb::{BrowserDB, HistoryEntry};
+use zawradb::{ZawraDB, HistoryEntry};
 use rand::Rng;
 use std::time::Instant;
 use std::path::Path;
@@ -10,12 +10,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::remove_dir_all(db_path)?;
     }
 
-    println!("🔥 Starting BrowserDB Stress Test");
+    println!("🔥 Starting ZawraDB Stress Test");
     println!("================================");
 
     // 1. Database Initialization
     let start_init = Instant::now();
-    let db = BrowserDB::open(db_path)?;
+    let db = ZawraDB::open(db_path)?;
     println!("✅ Database initialized in {:?}", start_init.elapsed());
 
     // Configuration
@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(db); // Force close/flush
 
     let reopen_start = Instant::now();
-    let db2 = BrowserDB::open(db_path)?;
+    let db2 = ZawraDB::open(db_path)?;
     println!("   Re-opened in {:.2?}", reopen_start.elapsed());
 
     let verify_id = TOTAL_RECORDS / 2;
@@ -117,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::mem::forget(db2);
 
     println!("   Re-opening database to check WAL recovery...");
-    let db3 = BrowserDB::open_without_locking(db_path)?;
+    let db3 = ZawraDB::open_without_locking(db_path)?;
     if let Some(recovered) = db3.history().get(crash_id as u128)? {
         println!("   ✅ Successfully recovered record '{}' from WAL!", recovered.title);
     } else {

@@ -1,5 +1,5 @@
-use browserdb::{BrowserDB, HistoryEntry};
-use browserdb::DatabaseMode;
+use zawradb::{ZawraDB, HistoryEntry};
+use zawradb::DatabaseMode;
 use tempfile::tempdir;
 
 fn now_ms() -> u128 {
@@ -12,22 +12,22 @@ fn now_ms() -> u128 {
 #[test]
 fn test_hot_search_ranking_and_limit() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
+    let db = ZawraDB::open(dir.path()).unwrap();
 
     let now = now_ms();
     let entries = vec![
         HistoryEntry {
             timestamp: now,
-            url: "https://browserdb.example.com/a".to_string(),
+            url: "https://zawradb.example.com/a".to_string(),
             url_hash: 1,
-            title: "BrowserDB alpha".to_string(),
+            title: "ZawraDB alpha".to_string(),
             visit_count: 5,
         },
         HistoryEntry {
             timestamp: now - 1_000,
-            url: "https://browserdb.example.com/b".to_string(),
+            url: "https://zawradb.example.com/b".to_string(),
             url_hash: 2,
-            title: "BrowserDB beta".to_string(),
+            title: "ZawraDB beta".to_string(),
             visit_count: 50,
         },
         HistoryEntry {
@@ -44,14 +44,14 @@ fn test_hot_search_ranking_and_limit() {
     }
 
     // Case-insensitive substring match on url/title; "Other site" must be filtered out.
-    let results = db.history().hot_search("browserdb", 10).unwrap();
+    let results = db.history().hot_search("zawradb", 10).unwrap();
     assert_eq!(results.len(), 2);
     // Higher visit_count wins regardless of slightly older timestamp.
     assert_eq!(results[0].url_hash, 2);
     assert_eq!(results[1].url_hash, 1);
 
     // Limit applies on top of the ranking.
-    let top1 = db.history().hot_search("browserdb", 1).unwrap();
+    let top1 = db.history().hot_search("zawradb", 1).unwrap();
     assert_eq!(top1.len(), 1);
     assert_eq!(top1[0].url_hash, 2);
 }
@@ -59,7 +59,7 @@ fn test_hot_search_ranking_and_limit() {
 #[test]
 fn test_hot_search_empty_query_returns_all_ranked() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
+    let db = ZawraDB::open(dir.path()).unwrap();
 
     let now = now_ms();
     db.history().insert(&HistoryEntry {
@@ -87,19 +87,19 @@ fn test_hot_search_empty_query_returns_all_ranked() {
 #[test]
 fn test_hot_search_ultra_mode() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
+    let db = ZawraDB::open(dir.path()).unwrap();
     db.set_mode(DatabaseMode::Ultra).unwrap();
 
     let now = now_ms();
     db.history().insert(&HistoryEntry {
         timestamp: now,
-        url: "https://browserdb.example/ultra".to_string(),
+        url: "https://zawradb.example/ultra".to_string(),
         url_hash: 99,
         title: "Ultra Test".to_string(),
         visit_count: 7,
     }).unwrap();
 
-    let results = db.history().hot_search("browserdb", 10).unwrap();
+    let results = db.history().hot_search("zawradb", 10).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].url_hash, 99);
 }

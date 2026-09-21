@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion, BatchSize};
-use browserdb::{BrowserDB, LocalStoreEntry, DatabaseMode};
+use zawradb::{ZawraDB, LocalStoreEntry, DatabaseMode};
 use tempfile::tempdir;
 use rand::Rng;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 fn bench_api_insert_with_index(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
+    let db = ZawraDB::open(dir.path()).unwrap();
     let table = db.localstore();
     let mut rng = rand::thread_rng();
 
@@ -47,7 +47,7 @@ fn bench_api_insert_with_index(c: &mut Criterion) {
 
 fn bench_query_builder_latency(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
+    let db = ZawraDB::open(dir.path()).unwrap();
     let table = db.localstore();
 
     // Populate data with index
@@ -81,7 +81,7 @@ fn bench_query_builder_latency(c: &mut Criterion) {
 
 fn bench_multi_threaded_concurrency(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let db = Arc::new(BrowserDB::open(dir.path()).unwrap());
+    let db = Arc::new(ZawraDB::open(dir.path()).unwrap());
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let mut handles = vec![];
@@ -138,7 +138,7 @@ fn bench_mode_comparison(c: &mut Criterion) {
     // Persistent mode — each benchmark gets its own fresh DB to avoid unbounded growth
     {
         let dir = tempdir().unwrap();
-        let db = BrowserDB::open(dir.path()).unwrap();
+        let db = ZawraDB::open(dir.path()).unwrap();
         db.set_mode(DatabaseMode::Persistent).unwrap();
         let table = db.localstore();
         let mut counter: u64 = 0;
@@ -165,7 +165,7 @@ fn bench_mode_comparison(c: &mut Criterion) {
     // Ultra mode — same approach
     {
         let dir = tempdir().unwrap();
-        let db = BrowserDB::open(dir.path()).unwrap();
+        let db = ZawraDB::open(dir.path()).unwrap();
         db.set_mode(DatabaseMode::Ultra).unwrap();
         let table = db.localstore();
         let mut counter: u64 = 0;

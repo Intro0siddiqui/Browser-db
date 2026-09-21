@@ -1,6 +1,6 @@
-use browserdb::core::lsm_tree::LSMTree;
-use browserdb::core::format::TableType;
-use browserdb::core::config::BrowserDBConfig;
+use zawradb::core::lsm_tree::LSMTree;
+use zawradb::core::format::TableType;
+use zawradb::core::config::ZawraDBConfig;
 use tempfile::tempdir;
 use std::fs::OpenOptions;
 use std::io::{Write, Seek, SeekFrom};
@@ -9,7 +9,7 @@ use std::io::{Write, Seek, SeekFrom};
 fn test_block_checksum_verification() {
     let dir = tempdir().unwrap();
     let path = dir.path();
-    let mut config = BrowserDBConfig::default();
+    let mut config = ZawraDBConfig::default();
     config.lsm_tree.verify_checksums = true;
 
     let lsm_tree = LSMTree::new(path, TableType::History, 1024 * 1024, config).unwrap();
@@ -38,7 +38,7 @@ fn test_block_checksum_verification() {
 
     // Re-open the tree to clear any cached state if necessary,
     // though here we are testing the Mmap read which should hit the corrupted file.
-    let mut config2 = BrowserDBConfig::default();
+    let mut config2 = ZawraDBConfig::default();
     config2.lsm_tree.verify_checksums = true;
     let lsm_tree2 = LSMTree::new(path, TableType::History, 1024 * 1024, config2).unwrap();
 

@@ -1,13 +1,13 @@
 use criterion::{criterion_group, criterion_main, Criterion, BatchSize};
-use browserdb::core::lsm_tree::{LSMTree};
-use browserdb::core::format::TableType;
-use browserdb::core::config::BrowserDBConfig;
+use zawradb::core::lsm_tree::{LSMTree};
+use zawradb::core::format::TableType;
+use zawradb::core::config::ZawraDBConfig;
 use tempfile::tempdir;
 use rand::Rng;
 
 fn bench_wal_throughput(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let tree = LSMTree::new(dir.path(), TableType::History, 1024 * 1024, BrowserDBConfig::default()).unwrap();
+    let tree = LSMTree::new(dir.path(), TableType::History, 1024 * 1024, ZawraDBConfig::default()).unwrap();
     let mut rng = rand::thread_rng();
 
     c.bench_function("put_with_channel_wal", |b| {
@@ -27,7 +27,7 @@ fn bench_wal_throughput(c: &mut Criterion) {
 
 fn bench_read_no_crc(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let mut config = BrowserDBConfig::default();
+    let mut config = ZawraDBConfig::default();
     config.lsm_tree.verify_checksums = false;
     let tree = LSMTree::new(dir.path(), TableType::History, 1024 * 1024, config).unwrap();
 
@@ -47,7 +47,7 @@ fn bench_read_no_crc(c: &mut Criterion) {
 
 fn bench_read_with_crc(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let mut config = BrowserDBConfig::default();
+    let mut config = ZawraDBConfig::default();
     config.lsm_tree.verify_checksums = true;
     let tree = LSMTree::new(dir.path(), TableType::History, 1024 * 1024, config).unwrap();
 
@@ -67,7 +67,7 @@ fn bench_read_with_crc(c: &mut Criterion) {
 
 fn bench_write_throughput(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let tree = LSMTree::new(dir.path(), TableType::History, 1024 * 1024, BrowserDBConfig::default()).unwrap();
+    let tree = LSMTree::new(dir.path(), TableType::History, 1024 * 1024, ZawraDBConfig::default()).unwrap();
 
     c.bench_function("write_throughput_100", |b| {
         b.iter(|| {

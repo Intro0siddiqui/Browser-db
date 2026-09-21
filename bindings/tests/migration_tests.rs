@@ -1,4 +1,4 @@
-use browserdb::*;
+use zawradb::*;
 use tempfile::tempdir;
 
 #[test]
@@ -6,7 +6,7 @@ fn test_mode_migration() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("migration_test.bdb");
 
-    let db = BrowserDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
+    let db = ZawraDB::open(db_path.to_str().unwrap()).expect("Failed to create database");
 
     // 1. Insert data in Persistent Mode
     let entry = HistoryEntry {

@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# BrowserDB 构建脚本
+# ZawraDB 构建脚本
 # 自动化构建整个项目
 
 set -e  # 遇到错误立即退出
 
-echo "🚀 BrowserDB 构建脚本"
+echo "🚀 ZawraDB 构建脚本"
 echo "========================"
 
 # 检查依赖
@@ -57,7 +57,7 @@ fi
 
 # 构建基准测试
 echo "⚡ 构建性能基准测试..."
-zig build -Drelease-fast -femit-bin=browserdb-bench
+zig build -Drelease-fast -femit-bin=zawradb-bench
 if [ $? -eq 0 ]; then
     echo "  ✅ 基准测试构建成功"
 else
@@ -71,7 +71,7 @@ echo "🔨 构建 Rust 绑定..."
 cd bindings
 
 # 设置环境变量
-export BROWSERDB_ZIG_PATH=$(which zig)
+export ZAWRADB_ZIG_PATH=$(which zig)
 
 # 清理 Rust 构建缓存
 cargo clean
@@ -112,9 +112,9 @@ cd ..
 
 # 运行快速基准测试
 echo "⚡ 运行快速基准测试..."
-if [ -f "core/zig-out/bin/browserdb-bench" ]; then
+if [ -f "core/zig-out/bin/zawradb-bench" ]; then
     echo "  执行基准测试..."
-    ./core/zig-out/bin/browserdb-bench || echo "  ⚠️  基准测试执行失败"
+    ./core/zig-out/bin/zawradb-bench || echo "  ⚠️  基准测试执行失败"
 else
     echo "  ⚠️  基准测试可执行文件不存在"
 fi
@@ -123,14 +123,14 @@ echo ""
 echo "🎉 构建完成！"
 echo ""
 echo "📦 可执行文件:"
-if [ -f "core/zig-out/bin/browserdb" ]; then
-    echo "  - 核心引擎: core/zig-out/bin/browserdb"
+if [ -f "core/zig-out/bin/zawradb" ]; then
+    echo "  - 核心引擎: core/zig-out/bin/zawradb"
 fi
-if [ -f "core/zig-out/bin/browserdb-bench" ]; then
-    echo "  - 基准测试: core/zig-out/bin/browserdb-bench"
+if [ -f "core/zig-out/bin/zawradb-bench" ]; then
+    echo "  - 基准测试: core/zig-out/bin/zawradb-bench"
 fi
-if [ -f "bindings/target/release/browserdb" ]; then
-    echo "  - Rust 绑定: bindings/target/release/browserdb"
+if [ -f "bindings/target/release/zawradb" ]; then
+    echo "  - Rust 绑定: bindings/target/release/zawradb"
 fi
 if [ -f "examples/target/release/basic_usage" ]; then
     echo "  - 示例程序: examples/target/release/basic_usage"
@@ -138,7 +138,7 @@ fi
 
 echo ""
 echo "🚀 快速开始:"
-echo "  cd core && ./zig-out/bin/browserdb"
+echo "  cd core && ./zig-out/bin/zawradb"
 echo "  cd bindings && cargo run --example basic_usage"
 
 # 生成构建报告

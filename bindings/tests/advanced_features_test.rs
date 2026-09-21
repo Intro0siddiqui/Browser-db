@@ -1,10 +1,10 @@
-use browserdb::{BrowserDB, LocalStoreEntry};
+use zawradb::{ZawraDB, LocalStoreEntry};
 use tempfile::tempdir;
 
 #[test]
 fn test_native_secondary_indexing() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
+    let db = ZawraDB::open(dir.path()).unwrap();
 
     let entry1 = LocalStoreEntry {
         origin_hash: 1,
@@ -33,7 +33,7 @@ fn test_native_secondary_indexing() {
 #[test]
 fn test_sharded_containers() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
+    let db = ZawraDB::open(dir.path()).unwrap();
 
     let normal = db.container("normal").unwrap();
     let private = db.container("private").unwrap();
@@ -52,7 +52,7 @@ fn test_sharded_containers() {
 #[test]
 fn test_streaming_iter_prefix_compression() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
+    let db = ZawraDB::open(dir.path()).unwrap();
     let ls = db.localstore();
 
     for i in 0..100 {

@@ -61,16 +61,16 @@ impl Default for HeatmapConfig {
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
-pub struct BrowserDBConfig {
+pub struct ZawraDBConfig {
     #[serde(default)]
     pub lsm_tree: LsmTreeConfig,
     #[serde(default)]
     pub heatmap: HeatmapConfig,
 }
 
-impl BrowserDBConfig {
+impl ZawraDBConfig {
     pub fn load_or_default(base_path: &Path) -> Self {
-        let config_path = base_path.join("browserdb.toml");
+        let config_path = base_path.join("zawradb.toml");
         if let Ok(content) = fs::read_to_string(&config_path) {
             toml::from_str(&content).unwrap_or_default()
         } else {

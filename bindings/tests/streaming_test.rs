@@ -1,12 +1,12 @@
-use browserdb::core::lsm_tree::LSMTree;
-use browserdb::core::format::TableType;
-use browserdb::core::config::BrowserDBConfig;
+use zawradb::core::lsm_tree::LSMTree;
+use zawradb::core::format::TableType;
+use zawradb::core::config::ZawraDBConfig;
 use tempfile::tempdir;
 
 #[test]
 fn test_streaming_iter_memtable() {
     let dir = tempdir().unwrap();
-    let config = BrowserDBConfig::default();
+    let config = ZawraDBConfig::default();
     let tree = LSMTree::new(dir.path(), TableType::History, 1024 * 1024, config).unwrap();
 
     let key1 = b"apple".to_vec();

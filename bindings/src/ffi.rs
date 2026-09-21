@@ -1,4 +1,4 @@
-use crate::BrowserDB;
+use crate::ZawraDB;
 use crate::HistoryEntry;
 use crate::LocalStoreEntry;
 use std::ffi::{CStr, CString};
@@ -7,7 +7,7 @@ use std::ptr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[no_mangle]
-pub extern "C" fn browserdb_open(path: *const c_char) -> *mut BrowserDB {
+pub extern "C" fn zawradb_open(path: *const c_char) -> *mut ZawraDB {
     if path.is_null() { return ptr::null_mut(); }
     let c_str = unsafe { CStr::from_ptr(path) };
     let path_str = match c_str.to_str() {
@@ -15,22 +15,22 @@ pub extern "C" fn browserdb_open(path: *const c_char) -> *mut BrowserDB {
         Err(_) => return ptr::null_mut(),
     };
 
-    match BrowserDB::open(path_str) {
+    match ZawraDB::open(path_str) {
         Ok(db) => Box::into_raw(Box::new(db)),
         Err(_) => ptr::null_mut(),
     }
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_close(db: *mut BrowserDB) {
+pub extern "C" fn zawradb_close(db: *mut ZawraDB) {
     if !db.is_null() {
         unsafe { drop(Box::from_raw(db)) };
     }
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_history_insert(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_history_insert(
+    db: *mut ZawraDB,
     url: *const c_char,
     title: *const c_char,
     visit_count: u32
@@ -57,8 +57,8 @@ pub extern "C" fn browserdb_history_insert(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_history_insert_with_ttl(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_history_insert_with_ttl(
+    db: *mut ZawraDB,
     url: *const c_char,
     title: *const c_char,
     visit_count: u32,
@@ -86,8 +86,8 @@ pub extern "C" fn browserdb_history_insert_with_ttl(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_history_increment(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_history_increment(
+    db: *mut ZawraDB,
     url_hash_low: u64,
     url_hash_high: u64,
     delta: i64
@@ -104,8 +104,8 @@ pub extern "C" fn browserdb_history_increment(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_history_get_title(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_history_get_title(
+    db: *mut ZawraDB,
     url_hash_low: u64,
     url_hash_high: u64
 ) -> *mut c_char {
@@ -123,15 +123,15 @@ pub extern "C" fn browserdb_history_get_title(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_free_string(s: *mut c_char) {
+pub extern "C" fn zawradb_free_string(s: *mut c_char) {
     if !s.is_null() {
         unsafe { let _ = CString::from_raw(s); };
     }
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_localstore_insert(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_localstore_insert(
+    db: *mut ZawraDB,
     origin: *const c_char,
     key: *const c_char,
     value: *const c_char,
@@ -156,8 +156,8 @@ pub extern "C" fn browserdb_localstore_insert(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_localstore_get(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_localstore_get(
+    db: *mut ZawraDB,
     origin: *const c_char,
     key: *const c_char,
 ) -> *mut c_char {
@@ -181,8 +181,8 @@ pub extern "C" fn browserdb_localstore_get(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_localstore_remove(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_localstore_remove(
+    db: *mut ZawraDB,
     origin: *const c_char,
     key: *const c_char,
 ) -> c_int {
@@ -210,8 +210,8 @@ pub extern "C" fn browserdb_localstore_remove(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_localstore_clear(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_localstore_clear(
+    db: *mut ZawraDB,
     origin: *const c_char,
 ) -> c_int {
     if db.is_null() || origin.is_null() { return -1; }
@@ -240,8 +240,8 @@ pub extern "C" fn browserdb_localstore_clear(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_localstore_get_all(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_localstore_get_all(
+    db: *mut ZawraDB,
     origin: *const c_char,
     callback: extern "C" fn(*const c_char, *const c_char, *mut std::ffi::c_void),
     user_data: *mut std::ffi::c_void,
@@ -265,8 +265,8 @@ pub extern "C" fn browserdb_localstore_get_all(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_settings_set(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_settings_set(
+    db: *mut ZawraDB,
     key: *const c_char,
     value: *const c_char,
 ) -> c_int {
@@ -282,8 +282,8 @@ pub extern "C" fn browserdb_settings_set(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_settings_get(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_settings_get(
+    db: *mut ZawraDB,
     key: *const c_char,
 ) -> *mut c_char {
     if db.is_null() || key.is_null() { return ptr::null_mut(); }
@@ -297,8 +297,8 @@ pub extern "C" fn browserdb_settings_get(
 }
 
 #[no_mangle]
-pub extern "C" fn browserdb_settings_remove(
-    db: *mut BrowserDB,
+pub extern "C" fn zawradb_settings_remove(
+    db: *mut ZawraDB,
     key: *const c_char,
 ) -> c_int {
     if db.is_null() || key.is_null() { return -1; }

@@ -1,5 +1,5 @@
-use browserdb::{BrowserDB, HistoryEntry};
-use browserdb::DatabaseMode;
+use zawradb::{ZawraDB, HistoryEntry};
+use zawradb::DatabaseMode;
 use tempfile::tempdir;
 
 fn now_ms() -> u128 {
@@ -12,7 +12,7 @@ fn now_ms() -> u128 {
 #[test]
 fn test_ultra_ttl_read_side_enforcement() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
+    let db = ZawraDB::open(dir.path()).unwrap();
     db.set_mode(DatabaseMode::Ultra).unwrap();
 
     // 1ms TTL; the entry must be expired by the time we read it back.
@@ -33,7 +33,7 @@ fn test_ultra_ttl_read_side_enforcement() {
 #[test]
 fn test_ultra_ttl_purge_expired_reclaims_memory() {
     let dir = tempdir().unwrap();
-    let db = BrowserDB::open(dir.path()).unwrap();
+    let db = ZawraDB::open(dir.path()).unwrap();
     db.set_mode(DatabaseMode::Ultra).unwrap();
 
     let expired = HistoryEntry {

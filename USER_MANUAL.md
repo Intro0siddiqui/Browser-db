@@ -1,6 +1,6 @@
-# 👤 BrowserDB User Manual
+# 👤 ZawraDB User Manual
 
-Complete guide to using BrowserDB effectively in your applications.
+Complete guide to using ZawraDB effectively in your applications.
 
 ## 📋 Table of Contents
 
@@ -17,11 +17,11 @@ Complete guide to using BrowserDB effectively in your applications.
 ### Database Creation and Opening
 
 ```rust
-use browserdb::BrowserDB;
+use zawradb::ZawraDB;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open or create a database directory
-    let db = BrowserDB::open("my_app_data")?;
+    let db = ZawraDB::open("my_app_data")?;
     
     Ok(())
 }
@@ -29,20 +29,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Database Modes
 
-BrowserDB supports two primary modes:
+ZawraDB supports two primary modes:
 - **Persistent Mode** (Default): Disk-backed storage using LSM-Trees and WAL.
 - **Ultra Mode**: Pure in-memory `HashMap` storage for maximum speed but no persistence.
 
 You can switch modes at runtime:
 ```rust
-db.set_mode(browserdb::DatabaseMode::Ultra)?;
+db.set_mode(zawradb::DatabaseMode::Ultra)?;
 ```
 
 ---
 
 ## 🗄️ Core Data Tables
 
-BrowserDB organizes data into specialized tables. Each table provides a type-safe API.
+ZawraDB organizes data into specialized tables. Each table provides a type-safe API.
 
 ### Available Tables
 - `history()`: Browsing history (supports TTL, counters via `increment`, and `hot_search`)
@@ -54,7 +54,7 @@ BrowserDB organizes data into specialized tables. Each table provides a type-saf
 - `settings()`: General application preferences
 
 ### Multi-Tenant Storage Containers
-BrowserDB supports isolated storage containers (tenants) within a single database path:
+ZawraDB supports isolated storage containers (tenants) within a single database path:
 ```rust
 let tenant_a = db.container("user_alice")?;
 tenant_a.history().insert(&entry)?;
@@ -68,7 +68,7 @@ let bob_history = tenant_b.history().count()?;
 
 #### 1. History Table & Features
 ```rust
-use browserdb::HistoryEntry;
+use zawradb::HistoryEntry;
 
 // Standard insert
 db.history().insert(&HistoryEntry {
@@ -91,7 +91,7 @@ let top_matches = db.history().hot_search("example", 10)?;
 
 #### 2. Bookmarks Table
 ```rust
-use browserdb::BookmarkEntry;
+use zawradb::BookmarkEntry;
 
 db.bookmarks().insert(&BookmarkEntry {
     timestamp: 1234567890,
@@ -106,7 +106,7 @@ db.bookmarks().delete(42)?;
 
 #### 3. LocalStore Table (Indexed)
 ```rust
-use browserdb::LocalStoreEntry;
+use zawradb::LocalStoreEntry;
 
 let entry = LocalStoreEntry {
     origin_hash: 111222,
@@ -148,7 +148,7 @@ let version = db.settings().get("app_version")?;
 For `localstore`, you can use `insert_with_index` which performs atomic updates to both the primary data and indices.
 
 ### 2. MemTable Tuning
-Adjust `max_memtable_size_mb` in `browserdb.toml` to balance memory usage and disk I/O. Larger memtables reduce flush frequency but increase memory consumption.
+Adjust `max_memtable_size_mb` in `zawradb.toml` to balance memory usage and disk I/O. Larger memtables reduce flush frequency but increase memory consumption.
 
 ---
 
@@ -166,7 +166,7 @@ if let Err(e) = db.history().insert(&entry) {
 
 ## ✅ Best Practices
 
-1. **Graceful Exit**: BrowserDB attempts to flush the MemTable on drop. Ensure your application shuts down cleanly to guarantee data persistence.
+1. **Graceful Exit**: ZawraDB attempts to flush the MemTable on drop. Ensure your application shuts down cleanly to guarantee data persistence.
 2. **Key Hashing**: Use consistent hashing for URLs and domains to ensure efficient lookups in history and cookie tables.
 3. **Directory Permissions**: Ensure the application has read/write access to the database directory.
 

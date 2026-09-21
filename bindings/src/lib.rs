@@ -11,7 +11,7 @@ use fs2::FileExt;
 
 pub use crate::core::modes::{DatabaseMode, ModeConfig};
 use crate::core::modes::{ModeSwitcher, CurrentMode};
-use crate::core::config::BrowserDBConfig;
+use crate::core::config::ZawraDBConfig;
 
 pub mod types {
     pub use super::{
@@ -219,7 +219,7 @@ impl Container {
     }
 }
 
-pub struct BrowserDB {
+pub struct ZawraDB {
     base_path: PathBuf,
     config: ModeConfig,
     containers: RwLock<HashMap<String, Arc<Container>>>,
@@ -227,7 +227,7 @@ pub struct BrowserDB {
     _lock_file: File,
 }
 
-impl BrowserDB {
+impl ZawraDB {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         Self::open_with_locking(path, true)
     }
@@ -242,7 +242,7 @@ impl BrowserDB {
             fs::create_dir_all(path)?;
         }
 
-        let lock_path = path.join("browserdb.lock");
+        let lock_path = path.join("zawradb.lock");
         let lock_file = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -255,7 +255,7 @@ impl BrowserDB {
             })?;
         }
 
-        let ext_config = BrowserDBConfig::load_or_default(path);
+        let ext_config = ZawraDBConfig::load_or_default(path);
 
         let config = ModeConfig {
             max_memory: 1024 * 1024 * 100, // 100MB Default
@@ -275,7 +275,7 @@ impl BrowserDB {
                     max_memory: 0,
                     enable_compression: false,
                     enable_heat_tracking: false,
-                    ext_config: BrowserDBConfig::default(),
+                    ext_config: ZawraDBConfig::default(),
                 })?),
                 pku: 0,
             }),

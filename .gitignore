@@ -1,4 +1,4 @@
-# BrowserDB 项目文件
+# ZawraDB 项目文件
 
 # 系统文件
 .DS_Store
@@ -27,7 +27,7 @@ Cargo.lock
 *.bdb
 test-*
 bench-*
-/tmp/browserdb*
+/tmp/zawradb*
 
 # 编辑器和IDE
 .vscode/

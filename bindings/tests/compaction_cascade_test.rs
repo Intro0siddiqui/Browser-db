@@ -1,16 +1,16 @@
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
-use browserdb::core::lsm_tree::LSMTree;
-use browserdb::core::format::TableType;
-use browserdb::core::config::BrowserDBConfig;
+use zawradb::core::lsm_tree::LSMTree;
+use zawradb::core::format::TableType;
+use zawradb::core::config::ZawraDBConfig;
 
 #[test]
 fn test_compaction_cascade() {
     let dir = tempdir().unwrap();
     let path = dir.path();
 
-    let mut config = BrowserDBConfig::default();
+    let mut config = ZawraDBConfig::default();
     // Set low thresholds to trigger cascading compaction easily
     config.lsm_tree.max_level0_files = 2;
     config.lsm_tree.level_size_thresholds_mb = vec![1, 2, 4]; // L1: 1MB, L2: 2MB, L3: 4MB

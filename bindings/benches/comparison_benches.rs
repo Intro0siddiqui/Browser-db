@@ -2,16 +2,16 @@ use criterion::{criterion_group, criterion_main, Criterion, BatchSize};
 use tempfile::tempdir;
 use rand::Rng;
 
-fn bench_browserdb_put(c: &mut Criterion) {
-    use browserdb::core::lsm_tree::LSMTree;
-    use browserdb::core::format::TableType;
-    use browserdb::core::config::BrowserDBConfig;
+fn bench_zawradb_put(c: &mut Criterion) {
+    use zawradb::core::lsm_tree::LSMTree;
+    use zawradb::core::format::TableType;
+    use zawradb::core::config::ZawraDBConfig;
 
     let dir = tempdir().unwrap();
-    let tree = LSMTree::new(dir.path(), TableType::History, 1024 * 1024, BrowserDBConfig::default()).unwrap();
+    let tree = LSMTree::new(dir.path(), TableType::History, 1024 * 1024, ZawraDBConfig::default()).unwrap();
     let mut rng = rand::thread_rng();
 
-    c.bench_function("browserdb_put", |b| {
+    c.bench_function("zawradb_put", |b| {
         b.iter_batched(
             || {
                 let key: Vec<u8> = (0..16).map(|_| rng.gen()).collect();
@@ -26,13 +26,13 @@ fn bench_browserdb_put(c: &mut Criterion) {
     });
 }
 
-fn bench_browserdb_get(c: &mut Criterion) {
-    use browserdb::core::lsm_tree::LSMTree;
-    use browserdb::core::format::TableType;
-    use browserdb::core::config::BrowserDBConfig;
+fn bench_zawradb_get(c: &mut Criterion) {
+    use zawradb::core::lsm_tree::LSMTree;
+    use zawradb::core::format::TableType;
+    use zawradb::core::config::ZawraDBConfig;
 
     let dir = tempdir().unwrap();
-    let mut config = BrowserDBConfig::default();
+    let mut config = ZawraDBConfig::default();
     config.lsm_tree.verify_checksums = false;
     let tree = LSMTree::new(dir.path(), TableType::History, 1024 * 1024, config).unwrap();
 
@@ -42,7 +42,7 @@ fn bench_browserdb_get(c: &mut Criterion) {
     tree.flush().unwrap();
 
     let mut rng = rand::thread_rng();
-    c.bench_function("browserdb_get", |b| {
+    c.bench_function("zawradb_get", |b| {
         b.iter(|| {
             let key = format!("key_{:06}", rng.gen_range(0..10000)).into_bytes();
             let _ = tree.get(&key);
@@ -160,8 +160,8 @@ fn bench_sqlite_get(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_browserdb_put,
-    bench_browserdb_get,
+    bench_zawradb_put,
+    bench_zawradb_get,
     bench_leveldb_put,
     bench_leveldb_get,
     bench_sqlite_put,
