@@ -186,6 +186,20 @@ impl Container {
         Ok(())
     }
 
+    pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let current_mode = self.switcher.current_mode.read();
+        if let CurrentMode::Persistent(pm) = &*current_mode {
+            pm.history.flush()?;
+            pm.bookmarks.flush()?;
+            pm.cookies.flush()?;
+            pm.cache.flush()?;
+            pm.localstore.flush()?;
+            pm.settings.flush()?;
+            pm.binarystore.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn stats(&self) -> Result<DatabaseStats, Box<dyn std::error::Error>> {
         let history = self.history().count()? as u64;
         let bookmarks = self.bookmarks().count()? as u64;
@@ -378,6 +392,15 @@ impl ZawraDB {
     
     pub fn wipe(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.default_container.wipe()
+    }
+
+    pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.default_container.flush()?;
+        let containers = self.containers.read();
+        for container in containers.values() {
+            container.flush()?;
+        }
+        Ok(())
     }
 }
 
