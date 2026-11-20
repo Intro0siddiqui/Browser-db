@@ -241,6 +241,8 @@ pub struct ZawraDB {
     _lock_file: File,
 }
 
+pub type BrowserDB = ZawraDB;
+
 impl ZawraDB {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         Self::open_with_locking(path, true)
