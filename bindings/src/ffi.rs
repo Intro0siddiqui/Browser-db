@@ -129,6 +129,70 @@ pub extern "C" fn zawradb_free_string(s: *mut c_char) {
     }
 }
 
+fn escape_json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Query the history table and return recent entries as a JSON string.
+///
+/// Format: `[{"title":"...","url":"...","visit_time":12345}, ...]`
+/// Writes up to `out_max_len` bytes into `out_json_buf` (NUL-terminated).
+/// Returns the number of bytes written (excluding NUL).
+#[no_mangle]
+pub extern "C" fn zawradb_get_recent_history(
+    db: *mut ZawraDB,
+    limit: u32,
+    out_json_buf: *mut u8,
+    out_max_len: usize,
+) -> usize {
+    if db.is_null() || out_json_buf.is_null() || out_max_len == 0 {
+        return 0;
+    }
+    let db = unsafe { &*db };
+    let entries = match db.history().hot_search("", limit as usize) {
+        Ok(e) => e,
+        Err(_) => Vec::new(),
+    };
+
+    let mut json = String::from("[");
+    for (i, entry) in entries.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str(&format!(
+            "{{\"title\":{},\"url\":{},\"visit_time\":{}}}",
+            escape_json_str(&entry.title),
+            escape_json_str(&entry.url),
+            entry.timestamp
+        ));
+    }
+    json.push(']');
+
+    let bytes = json.as_bytes();
+    let write_len = bytes.len().min(out_max_len - 1);
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), out_json_buf, write_len);
+        *out_json_buf.add(write_len) = 0;
+    }
+    write_len
+}
+
 #[no_mangle]
 pub extern "C" fn zawradb_localstore_insert(
     db: *mut ZawraDB,
