@@ -530,7 +530,7 @@ impl<'a> HistoryTable<'a> {
         Ok(matched)
     }
 
-    pub fn wipe_domain(&self, domain: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    fn delete_where<F: Fn(&HistoryEntry) -> bool>(&self, pred: F) -> Result<usize, Box<dyn std::error::Error>> {
         let current_mode = self.container.switcher.current_mode.read();
         let all_entries: Vec<(Vec<u8>, Vec<u8>)> = match &*current_mode {
             CurrentMode::Persistent(pm) => {
@@ -542,7 +542,7 @@ impl<'a> HistoryTable<'a> {
         let mut count = 0;
         for (key, value) in all_entries {
             let entry: HistoryEntry = bincode::deserialize(&value)?;
-            if entry.url.contains(domain) {
+            if pred(&entry) {
                 match &*current_mode {
                     CurrentMode::Persistent(pm) => pm.history.delete(key)?,
                     CurrentMode::Ultra(um) => um.history.delete(&key),
@@ -551,6 +551,18 @@ impl<'a> HistoryTable<'a> {
             }
         }
         Ok(count)
+    }
+
+    pub fn wipe_domain(&self, domain: &str) -> Result<usize, Box<dyn std::error::Error>> {
+        self.delete_where(|entry| entry.url.contains(domain))
+    }
+
+    pub fn delete_since(&self, cutoff_timestamp: u128) -> Result<usize, Box<dyn std::error::Error>> {
+        self.delete_where(|entry| entry.timestamp >= cutoff_timestamp)
+    }
+
+    pub fn delete_url(&self, url: &str) -> Result<usize, Box<dyn std::error::Error>> {
+        self.delete_where(|entry| entry.url == url)
     }
 }
 
